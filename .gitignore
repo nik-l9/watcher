@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.venv/
+# Every .env variant, not two named ones. A `.env.bak.<timestamp>` written by a tool once sat
+# untracked here with live credentials in it, matched by neither `.env` nor `.env.local`, one
+# `git add -A` from being committed. Match the shape of the name, not the names seen so far.
+.env
+.env.*
+!.env.example
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+node_modules/
+.next/
+data/
+*.parquet
+*.duckdb
+
+# graphify code-graph build artifact
+graphify-out/
+
+# Captured eval runs. Bundles are how a scoring change gets re-measured without paying
+# for another run, so they are written by default -- but they are outputs, and a baseline
+# worth keeping should be copied somewhere deliberate rather than committed by accident.
+eval-runs/

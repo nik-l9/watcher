@@ -1,0 +1,203 @@
+# Local development stack for Cortex.
+#
+# Non-default host ports throughout: a developer machine usually already runs
+# Postgres on 5432 and Redis on 6379. FalkorDB speaks the Redis protocol, so a
+# shadowed port surfaces as a baffling "unknown command 'GRAPH.QUERY'" rather than
+# a connection error.
+#
+# Infrastructure starts by default. The application services live in the `app`
+# profile so `docker compose up -d` stays fast for test-driven work:
+#   docker compose up -d                    # infrastructure only
+#   docker compose --profile app up -d      # everything
+
+x-service-env: &service-env
+  CORTEX_ENV: local
+  CORTEX_POSTGRES_DSN: postgresql+asyncpg://cortex:cortex@postgres:5432/cortex
+  CORTEX_FALKORDB_HOST: falkordb
+  CORTEX_FALKORDB_PORT: 6379
+  CORTEX_QDRANT_URL: http://qdrant:6333
+  CORTEX_REDIS_URL: redis://redis:6379/0
+  CORTEX_VAULT_MASTER_KEY: ${CORTEX_VAULT_MASTER_KEY:?set CORTEX_VAULT_MASTER_KEY in .env}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  # Slack. Both optional and both fail safe: with no signing secret the /slack/events endpoint
+  # refuses every request rather than verifying an internet-facing webhook against an empty key,
+  # and with no base URL a delivered message carries no report link rather than a localhost one.
+  #
+  # These were missing when the endpoint was first deployed, and the symptom was exactly what the
+  # design intends: a correctly signed request got a 401, because the container had no secret to
+  # check it against. Fails closed, visibly.
+  CORTEX_SLACK_SIGNING_SECRET: ${CORTEX_SLACK_SIGNING_SECRET:-}
+  CORTEX_SLACK_APP_TOKEN: ${CORTEX_SLACK_APP_TOKEN:-}
+  CORTEX_PUBLIC_BASE_URL: ${CORTEX_PUBLIC_BASE_URL:-}
+  VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+
+x-depends-on-infra: &depends-on-infra
+  postgres:
+    condition: service_healthy
+  falkordb:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  qdrant:
+    condition: service_healthy
+
+services:
+  # ----------------------------------------------------------- infrastructure
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: cortex
+      POSTGRES_DB: cortex
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6381:6379"
+      - "3001:3000" # FalkorDB Browser
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ----------------------------------------------------------- application
+
+  migrate:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: migrate
+    environment: *service-env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: gateway
+    environment: *service-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      <<: *depends-on-infra
+      migrate:
+        condition: service_completed_successfully
+
+  investigation-worker:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: investigation-worker
+    environment: *service-env
+    depends_on:
+      <<: *depends-on-infra
+      migrate:
+        condition: service_completed_successfully
+    # Scale this independently of the gateway: its bottleneck is token
+    # throughput, not HTTP concurrency.
+    deploy:
+      replicas: 1
+
+  ingest-worker:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: ingest-worker
+    environment: *service-env
+    depends_on:
+      <<: *depends-on-infra
+      migrate:
+        condition: service_completed_successfully
+
+  # Slack Socket Mode. Dials out to Slack and holds the connection open, so Cortex needs no
+  # public URL -- which is what makes `docker compose up` sufficient for somebody running this
+  # against their own keys. A Slack app has exactly one events transport: enabling Socket Mode
+  # disables the Request URL, so this and the gateway's /slack/events are alternatives, not a
+  # pair. Unset CORTEX_SLACK_APP_TOKEN and the service exits cleanly rather than crash-looping.
+  slack-socket:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: slack-socket
+    environment: *service-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # One replica. Slack delivers each event to exactly one open connection, so a second buys
+    # nothing and doubles what an operator has to reason about when an event does not arrive.
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+
+  scheduler:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: scheduler
+    environment: *service-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Exactly one replica. Two beat processes double-fire every nightly sync.
+    deploy:
+      replicas: 1
+
+volumes:
+  postgres_data:
+  falkordb_data:
+  qdrant_data:
+  redis_data:
