@@ -1,0 +1,95 @@
+# Slack app manifest for @cortex.
+#
+# Paste this at https://api.slack.com/apps -> Create New App -> From an app manifest, choosing the
+# your workspace. Then replace the request_url below with your public URL and reinstall.
+#
+# ## Socket Mode or a webhook
+
+# Socket Mode opens an outbound WebSocket with an app-level token and needs nothing inbound
+# exposed, which makes it the easier transport to run locally or behind NAT. It also *disables*
+# the HTTP Request URL, so one Slack app cannot do both: an app switched to Socket Mode stops
+# delivering to any webhook it had configured. Pick one per app.
+#
+# This repository implements and tests both. See `docs/running-it.md`.
+
+# ## Setting the app up
+
+#   1. Create the app from this manifest, then install it to the workspace.
+#   2. OAuth & Permissions -> Bot User OAuth Token.
+#      A bot token is bound to the app that issued it, so a token from another app posts as
+#      that app rather than as this one.
+#   2. Basic Information -> App Credentials -> Signing Secret.
+#   3. Point the request_url below at a public URL and save; Slack sends a `url_verification`
+#      challenge, which the endpoint answers only after checking the signature.
+#   4. Store the token and secret (see docs/running-it.md).
+#   5. `/invite @cortex` in the channels it should answer in.
+#
+# A workspace is bound to a tenant by `tenants.slack_team_id`. That mapping is the only thing
+# deciding whose data an inbound event reads, so it has to be set before the app is used.
+
+display_information:
+  name: Cortex
+  description: Asks your GTM data why a number moved, and answers with citations.
+  long_description: >-
+    Mention Cortex with a question about your GTM data — "why did signups fall last week?",
+    "which PR shipped most recently to the company website?" — and it investigates across
+    GitHub, Slack, PostHog and HubSpot, then answers in the thread.
+
+
+    Every claim it makes carries the identifiers of the observations that establish it. Claims
+    whose citations do not resolve against the evidence store are removed before you see the
+    report, by code rather than by judgement, and a second pass re-reads each surviving claim
+    against only its own cited evidence. When the evidence does not support a cause, it says so
+    instead of naming one.
+
+
+    An investigation takes about ninety seconds. The reply links to the full report, where every
+    citation is clickable through to the raw observation it came from.
+  background_color: "#111827"
+
+features:
+  bot_user:
+    display_name: Cortex
+    # False: the answer arrives ninety seconds later, so a presence indicator would show
+    # "away" at exactly the moment somebody is waiting on it.
+    always_online: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - files:write
+
+settings:
+  event_subscriptions:
+    # Replace with your public URL. For a trial: `cloudflared tunnel --url http://localhost:8000`
+    # then use the printed https URL + /slack/events. A tunnel URL changes when it restarts and
+    # Slack does not follow it, so a permanent host is worth having once the trial outlives an
+    # afternoon.
+    # Ignored while socket_mode_enabled is true. Kept so switching transports is a one-line
+    # change rather than a rediscovery of the event list.
+    request_url: https://REPLACE-ME/slack/events
+    bot_events:
+      # One event. Everything else Slack would send is acknowledged and ignored by the endpoint,
+      # but subscribing narrowly means it is never sent in the first place.
+      - app_mention
+  interactivity:
+    # Nothing to click yet. The report page is where a reader interacts with an answer.
+    is_enabled: false
+  org_deploy_enabled: false
+  # False, deliberately: Socket Mode and an HTTP Request URL are mutually exclusive, and the
+  # webhook is what is built and tested. See the note at the top about transports.
+  # **Socket Mode is the recommended transport, and this is the one setting to get right.**
+  #
+  # An app has exactly one events transport: with this true, Slack ignores the request_url below
+  # and delivers over an outbound WebSocket instead, which means Cortex needs no public HTTPS
+  # endpoint at all. That is what makes `docker compose up` sufficient for anyone running this
+  # against their own keys.
+  #
+  # It is also the failure that took this app off the air once: Socket Mode was enabled in the UI
+  # while the deployment was still running the webhook, and the gateway stayed healthy and
+  # received nothing. If you set this false, run `services/gateway`'s /slack/events with a real
+  # public URL; if you set it true, run `services/slack_socket` and set CORTEX_SLACK_APP_TOKEN.
+  socket_mode_enabled: true
+  token_rotation_enabled: false

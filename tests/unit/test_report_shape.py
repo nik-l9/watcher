@@ -1,0 +1,393 @@
+"""How much report a question deserves.
+
+The asymmetry is the whole design, and it is what these tests are aimed at: a padded
+answer to a lookup wastes a reader's time, while a thin answer to "why did signups fall" is
+the product not working. So the classifier is allowed to be wrong in one direction only,
+and the tests that matter most are the ones where a question *looks* like a lookup and is
+not — "did signups fall last week, and why?" opens with "did" and must still get the full
+report.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from cortex.agents.investigator import _drafting_instruction
+from cortex.eval.fixtures import SCENARIOS, by_name
+from cortex.eval.scorer import Scorer
+from cortex.reports.schema import Claim, Confidence, InvestigationReport, PremiseVerdict
+from cortex.reports.shape import (
+    AMBIGUITY_GUIDANCE,
+    GUIDANCE,
+    Ambiguity,
+    Shape,
+    ambiguities,
+    shape_for,
+)
+
+
+class TestFactualQuestions:
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "Check if we have integrated the Apollo company deanonymiser in our website",
+            "do we have HubSpot connected?",
+            "which plan is Acme on?",
+            "when did the mobile onboarding ship?",
+            "how many deploys went out in July?",
+            "list the PostHog projects we have access to",
+            "is there a Slack channel for growth?",
+            "can you confirm we track signup events in GA4?",
+            "who owns the onboarding funnel?",
+        ],
+    )
+    def test_a_lookup_is_factual(self, question: str) -> None:
+        assert shape_for(question) is Shape.FACTUAL
+
+
+class TestCausalQuestions:
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "Why did signups fall last week?",
+            "what caused the drop in mobile conversion?",
+            "explain the spike in trial starts",
+            "signups are down 12%, diagnose it",
+            "GA4 sessions moved sharply on the 14th — what happened?",
+            "investigate the conversion regression",
+        ],
+    )
+    def test_a_causal_question_is_causal(self, question: str) -> None:
+        assert shape_for(question) is Shape.CAUSAL
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "did signups fall last week, and why?",
+            "do we know what caused the drop?",
+            "check whether the deploy on the 14th caused the decline",
+            "is there a reason conversion dropped?",
+            "when did signups start falling, and what changed?",
+        ],
+    )
+    def test_a_lookup_opener_does_not_win_over_a_causal_word(self, question: str) -> None:
+        """The regression this file exists to prevent. Each of these opens with "did", "do
+        we", "check" or "is there" and is a causal question. A leading-word rule alone
+        would have shortened exactly the reports that must not be short."""
+        assert shape_for(question) is Shape.CAUSAL
+
+    @pytest.mark.parametrize("question", ["", "   ", "signups", "the onboarding modal"])
+    def test_an_unrecognised_question_gets_the_full_report(self, question: str) -> None:
+        """Defaulting to CAUSAL makes the only mistake available the harmless one."""
+        assert shape_for(question) is Shape.CAUSAL
+
+    def test_every_causal_eval_scenario_is_causal(self) -> None:
+        """The suite measures accuracy, completeness and actionability on causal
+        investigations. If this change reclassified one of them as a lookup, the guidance
+        would tell the model to leave hypotheses and recommendations empty and the scores
+        would fall for a reason that had nothing to do with investigating.
+
+        The false-premise scenario is excluded because it is the exception on purpose: *"Did our
+        signups fall from last month?"* is a check, and being classified as one is the behaviour
+        it tests. `_completeness` knows the difference, so it is not scored for the sections a
+        factual answer is told to leave out."""
+        for scenario in SCENARIOS:
+            if scenario.ground_truth.is_false_premise:
+                continue
+            assert shape_for(scenario.question) is Shape.CAUSAL, scenario.name
+
+    def test_the_false_premise_scenario_is_factual(self) -> None:
+        """The other half of the same claim, asserted rather than assumed: if this scenario ever
+        routes as causal again, the analyst will be told to hunt a cause for a fall that did not
+        happen, which is precisely the live failure."""
+        premise = [s for s in SCENARIOS if s.ground_truth.is_false_premise]
+        assert premise, "the suite has no false-premise scenario"
+        for scenario in premise:
+            assert shape_for(scenario.question) is Shape.FACTUAL, scenario.name
+
+
+class TestTheGuidanceReachesTheModel:
+    def test_a_factual_question_is_told_to_leave_hypotheses_empty(self) -> None:
+        instruction = _drafting_instruction("do we have HubSpot connected?", [], "answered")
+        assert "hypotheses empty" in instruction
+
+    def test_a_causal_question_is_told_to_record_what_it_ruled_out(self) -> None:
+        instruction = _drafting_instruction("why did signups fall?", [], "answered")
+        assert "ruled out" in instruction
+        assert "hypotheses empty" not in instruction
+
+    def test_the_grounding_rules_survive_either_shape(self) -> None:
+        """The shape guidance is added to the drafting instruction, not substituted for it.
+        A shorter report is still a cited one — an instruction that displaced the citation
+        rules would trade readability for the thing the product is."""
+        for question in ("do we have HubSpot connected?", "why did signups fall?"):
+            instruction = _drafting_instruction(question, [], "answered")
+            assert "evidence_ids" in instruction
+            assert "will be removed before the report is shown" in instruction.replace("\n", " ")
+
+    def test_both_shapes_are_described(self) -> None:
+        assert set(GUIDANCE) == set(Shape)
+
+
+class TestAYesNoQuestionAboutAMovement:
+    """The failure this split exists for, observed live in Slack.
+
+    Asked *"@Cortex did our signups fell from last month?"* the analyst produced four paragraphs
+    about mid-June, GitHub deploy searches and Slack incident hunts — and never said yes or no. The
+    honest answer was "no: 619 events over 12 days against 4,849 over 31 is a calendar artefact,
+    not a fall", and it was in the *fourth* bullet, after a figure that appeared to confirm the
+    premise.
+
+    The cause was a single combined pattern. `fall`, `fell` and `drop` sat in the causal set so that
+    a bare *"signups are down 12%"* would be treated as a request to explain, and that made every
+    yes/no **check** about a movement causal too. A causal report is exactly the wrong shape for a
+    question that asks *whether* something happened: it instructs the analyst to hunt for a cause
+    for an event nobody has established.
+
+    So the words are split. An explicit causal *request* wins over everything; a movement word
+    describes the subject and no longer overrides a lookup opener.
+    """
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "did our signups fell from last month?",
+            "did signups fall last month?",
+            "have signups dropped?",
+            "is conversion down?",
+            "are signups falling?",
+            "has revenue declined since June?",
+            "did mobile conversion drop last week?",
+            "was there a spike in errors yesterday?",
+        ],
+    )
+    def test_a_check_about_a_movement_is_factual(self, question: str) -> None:
+        assert shape_for(question) is Shape.FACTUAL
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "did signups fall last week, and why?",
+            "did signups fall, and what changed?",
+            "have signups dropped? what happened?",
+            "is conversion down because of the deploy?",
+            "has revenue declined — any reason?",
+        ],
+    )
+    def test_a_causal_request_still_wins_over_the_opener(self, question: str) -> None:
+        """The asymmetry that has to hold: a question can open as a check and still ask for a
+        cause, and getting that wrong costs a real investigation."""
+        assert shape_for(question) is Shape.CAUSAL
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "signups are down 12% this month",
+            "conversion fell off a cliff after Tuesday",
+            "the trial-start trend broke last week",
+        ],
+    )
+    def test_a_bare_statement_of_a_movement_is_still_causal(self, question: str) -> None:
+        """Why the movement words cannot simply be deleted. A statement with no interrogative is a
+        request to explain it, and this is the case they were added for."""
+        assert shape_for(question) is Shape.CAUSAL
+
+
+class TestFalsePremises:
+    """A question can assume something untrue, and the answer has to say so first.
+
+    This failure passes every grounding layer we have, which is why it needs its own guidance. Each
+    claim really is supported by the evidence it cites; the gate resolves every id, the verifier
+    finds nothing overstated. The report is simply answering a question whose premise nobody
+    checked, and a grounded answer to the wrong question still misinforms.
+
+    Our live example: *"did our signups fell from last month?"* assumes a fall. The delivered answer
+    led with "619 events for Aug 1–12 compared to July's total of 4,849", which reads as
+    confirmation, and corrected itself in the same sentence. A reader who stops after one line has
+    been misinformed by a report that was accurate throughout.
+    """
+
+    def test_the_factual_guidance_names_the_premise_problem(self) -> None:
+        guidance = GUIDANCE[Shape.FACTUAL]
+        assert "assumes something that is not true" in guidance
+        assert "in the first " in guidance
+
+    def test_it_forbids_leading_with_a_confirming_figure(self) -> None:
+        """The specific defect. Correcting a misleading number *after* stating it is not the same
+        as not leading with it."""
+        guidance = GUIDANCE[Shape.FACTUAL]
+        assert "Do not lead with a figure" in guidance
+        assert "correct it afterwards" in guidance
+
+    def test_it_names_the_artefacts_that_look_like_movements(self) -> None:
+        """The three that produced this incident and will produce the next one: unequal periods,
+        incomplete data, and a metric that changed definition. Each is the answer, not a caveat."""
+        guidance = GUIDANCE[Shape.FACTUAL]
+        for artefact in ("different lengths", "incomplete", "changed definition"):
+            assert artefact in guidance
+
+    def test_both_shapes_carry_the_premise_check(self) -> None:
+        """It was attached to FACTUAL alone, which is backwards.
+
+        A yes/no question wears its premise openly and can be answered without granting it —
+        "did signups fall" asks. A causal question has already granted it: "why did signups
+        fall" cannot be answered at all unless they fell. So the check was missing from exactly
+        the shape whose questions always carry a premise, and the paragraph's own second example
+        ("why is checkout slower on mobile") is a causal question.
+        """
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            assert "assumes something that is not true" in GUIDANCE[shape], shape
+
+    def test_a_why_question_receives_it(self) -> None:
+        """The routing that produced the live failure. Asked "did our signups fall from last
+        month" the analyst went FACTUAL, checked the premise and answered correctly. Asked to
+        compare three months and correlate the movement with product changes it went CAUSAL, was
+        handed no premise instruction, and argued a shared cause for two incidents a week apart.
+        """
+        for question in (
+            "why did signups fall?",
+            "why did our signups drop last month",
+            "what caused the signup drop",
+            "can you compare the last 3 months signups, whats the trend, is there any spikes, "
+            "or dips, and can we correlate those from any changes we made in product",
+        ):
+            assert shape_for(question) is Shape.CAUSAL, question
+            assert "assumes something that is not true" in GUIDANCE[shape_for(question)]
+
+    def test_the_causal_guidance_orders_the_effect_before_the_cause(self) -> None:
+        """A cause correctly argued for an effect that did not occur is wrong in a way no
+        amount of evidence behind it can fix, so establishing the effect is step zero rather
+        than an assumption inherited from the question."""
+        guidance = GUIDANCE[Shape.CAUSAL]
+        assert "Establish the effect before explaining it" in guidance
+        assert "already granted that it happened" in guidance
+
+    def test_the_causal_guidance_refuses_to_merge_two_incidents(self) -> None:
+        """The exact wrong answer: a signup cessation on 2026-08-04 explained by a pageview
+        collapse that began on 08-11, while pageviews were at 14,197/day on 08-04. Two metrics
+        turning down on different dates are two incidents."""
+        guidance = GUIDANCE[Shape.CAUSAL]
+        assert "Two things going wrong are not one thing going wrong" in guidance
+        assert "separate incidents until something ties them together" in guidance
+        assert "not corroboration" in guidance
+
+
+class TestThePremiseVerdictIsStatedNotInferred:
+    """The keyword list scored a correct refutation as a failure.
+
+    A live attempt opened "No -- this appears to be an artifact of an incomplete month, not a
+    real drop", and `accuracy` scored 0.50 for *never having refuted the premise*: the twelve
+    accepted denial phrasings included "did not drop" and "have not dropped" but not "not a real
+    drop". The placement dimension, reading the same sentence, scored 1.00 for refuting it in the
+    executive summary. Two dimensions contradicting each other about one sentence.
+    """
+
+    _TEXT = (
+        "No -- this appears to be an artifact of an incomplete month, not a real drop: "
+        "August 2026 shows only 1,884 signups versus 4,849 in July, but the August figure "
+        "only covers data through August 12."
+    )
+
+    def _report(self, **overrides: object) -> InvestigationReport:
+        import uuid
+
+        return InvestigationReport(
+            question="Did our signups fall from last month?",
+            executive_summary=[Claim(text=self._TEXT, evidence_ids=[uuid.uuid4()])],
+            confidence=Confidence.HIGH,
+            **overrides,  # type: ignore[arg-type]
+        )
+
+    def test_the_keyword_fallback_still_gets_this_wrong(self) -> None:
+        """Kept as a fallback so an older report scores as it did, and pinned so nobody mistakes
+        it for the primary path."""
+        truth = by_name("partial_month_false_premise").ground_truth
+        dimension = Scorer()._premise_accuracy(truth, self._report(), self._TEXT.lower())
+        assert dimension.score == 0.5
+        assert "never refuted the premise" in dimension.detail
+
+    def test_the_stated_verdict_scores_it_correctly(self) -> None:
+        truth = by_name("partial_month_false_premise").ground_truth
+        report = self._report(premise=PremiseVerdict.FALSE)
+        dimension = Scorer()._premise_accuracy(truth, report, self._TEXT.lower())
+        assert dimension.score == 1.0
+        assert dimension.detail == "refuted the premise"
+
+    def test_stating_the_wrong_verdict_still_fails(self) -> None:
+        """The field must not become a rubber stamp: a report that says the premise holds, on a
+        scenario whose premise is false, is wrong however it phrases its prose."""
+        truth = by_name("partial_month_false_premise").ground_truth
+        report = self._report(premise=PremiseVerdict.HOLDS)
+        dimension = Scorer()._premise_accuracy(truth, report, self._TEXT.lower())
+        assert dimension.score == 0.0
+        assert "the report says the premise is holds" in dimension.detail
+
+    def test_unverifiable_is_not_a_refutation(self) -> None:
+        """ "The evidence cannot settle it" is a different answer from "the evidence contradicts
+        it", and this scenario's evidence does settle it."""
+        truth = by_name("partial_month_false_premise").ground_truth
+        report = self._report(premise=PremiseVerdict.UNVERIFIABLE)
+        assert Scorer()._premise_accuracy(truth, report, self._TEXT.lower()).score == 0.0
+
+    def test_both_shapes_are_told_to_set_it(self) -> None:
+        """Either kind of question can carry a premise, so the instruction cannot live on one."""
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            assert "set `premise`" in GUIDANCE[shape], shape
+
+
+class TestStatingTheAssumptionRatherThanAsking:
+    """The free half of decision 9, and the research says it is the half that matters.
+
+    Every term in Horvitz's expected-utility calculation pushes our ask band narrow: a question
+    in a public Slack channel is latency-visible and breaks the one promise the product makes,
+    and our users are by construction in a hurry, which *lowers* the threshold for acting. What
+    is cheap is *stating* the reading taken — the gap between a wrong reading delivered silently
+    and one delivered with its assumption named is enormous and entirely under our control.
+
+    And the detection is a predicate, never a model's sense of vagueness. Six independent
+    measurements say a model cannot estimate its own need to clarify: clarification-need F1 of
+    0.33-0.37, one benchmark whose R-squared is negative, ambiguity detection at 54%.
+    """
+
+    def test_a_movement_with_nothing_to_compare_it_against_is_flagged(self) -> None:
+        """ "Why did signups fall" is unanswerable as asked -- against last week, last month, last
+        year? Each is a different question with a different answer."""
+        assert ambiguities("why did signups fall?") == (Ambiguity.UNSTATED_BASELINE,)
+
+    def test_a_named_period_settles_it(self) -> None:
+        assert ambiguities("why did signups fall in August 2026?") == ()
+
+    def test_an_explicit_comparison_settles_it(self) -> None:
+        for question in (
+            "why did signups fall versus July?",
+            "why did signups drop week over week?",
+            "why did signups fall compared to last month?",
+            "did signups drop last month?",
+        ):
+            assert ambiguities(question) == (), question
+
+    def test_a_question_naming_no_movement_is_not_flagged(self) -> None:
+        """A lookup has no movement to measure, so there is no baseline to be missing."""
+        assert ambiguities("which plan is Acme on?") == ()
+
+    def test_the_guidance_says_state_it_rather_than_ask(self) -> None:
+        """The distinction the research turns on. Asking costs the 90-second promise; stating
+        costs nothing and lets a reader correct a wrong reading in one line."""
+        guidance = AMBIGUITY_GUIDANCE[Ambiguity.UNSTATED_BASELINE]
+        assert "Do not ask which was meant" in guidance
+        assert "state one and let the reader correct you" in guidance
+
+    def test_the_guidance_asks_for_it_in_two_places(self) -> None:
+        """First sentence so a skimming reader sees it, risks so it survives summarisation."""
+        guidance = AMBIGUITY_GUIDANCE[Ambiguity.UNSTATED_BASELINE]
+        assert "first sentence" in guidance
+        assert "in the risks" in guidance
+
+    def test_it_reaches_the_live_prompt_only_when_it_applies(self) -> None:
+        from cortex.agents.investigator import _drafting_instruction
+
+        needle = "without saying what to measure it against"
+        assert needle in _drafting_instruction("why did signups fall?", ["x"], "budget")
+        assert needle not in _drafting_instruction(
+            "why did signups fall in August 2026?", ["x"], "budget"
+        )
