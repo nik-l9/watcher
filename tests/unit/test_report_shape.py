@@ -391,3 +391,27 @@ class TestStatingTheAssumptionRatherThanAsking:
         assert needle not in _drafting_instruction(
             "why did signups fall in August 2026?", ["x"], "budget"
         )
+
+
+class TestACausalReportMustNameTheChange:
+    """A report that found the cause and described it has withheld the useful part.
+
+    Run 26's `onboarding_regression` attempt identified the right pull request — it called
+    `commit_diff` on the sha and `pull_request_activity` on the number — and then wrote "a
+    mobile-only onboarding modal rework merged on 14 July". Correct, cited, and not actionable:
+    the reader has to go looking for what the analyst already had in hand. The other attempt
+    wrote "PR #913" and scored 0.99 against 0.88.
+    """
+
+    def test_the_causal_guidance_asks_for_the_identifier(self) -> None:
+        guidance = GUIDANCE[Shape.CAUSAL]
+        assert "Name the change, not its category" in guidance
+        # The three forms the evidence actually carries, so the instruction cannot be read as
+        # being about prose style.
+        for form in ("number", "sha", "tag"):
+            assert form in guidance, form
+
+    def test_a_factual_question_is_not_asked_for_one(self) -> None:
+        """Nothing to name: a factual question is not attributing a movement to a change, and
+        an instruction about identifying causes would be noise in that shape's guidance."""
+        assert "Name the change, not its category" not in GUIDANCE[Shape.FACTUAL]

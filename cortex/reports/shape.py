@@ -273,7 +273,14 @@ GUIDANCE: dict[Shape, str] = {
         "the onset from the evidence -- a series' `movement.level_shifts[].at`, or the last "
         "normal bucket before a gap -- and never by estimating from a chart. A cause dated "
         "after its effect is refused outright rather than ranked lower, so writing the dates "
-        "down is what lets an impossible explanation be eliminated instead of argued about."
+        "down is what lets an impossible explanation be eliminated instead of argued about.\n"
+        "**Name the change, not its category.** When the cause is a specific artefact -- a pull "
+        "request, a commit, a release, a flag flip -- name it the way the evidence names it: the "
+        "number, the sha, the tag. An evaluated report described its cause as 'a mobile-only "
+        "onboarding modal rework merged on 14 July', having read PR 913 and the sha of the commit "
+        "in it. That identifies the right change and still leaves the reader searching for it, "
+        "where the number is one click. Finding the cause and then describing it rather than "
+        "naming it is doing the hard part and withholding the useful part."
         "\n\n" + _PREMISE_CHECK
     ),
 }
