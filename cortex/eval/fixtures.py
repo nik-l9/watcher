@@ -243,6 +243,19 @@ class Scenario:
     #: this resolves to the `"after"` variant.
     change_date: date | None = None
 
+    #: Responses that differ by *subject* — which event, which repository — keyed by
+    #: `tool__capability` then by the subject value.
+    #:
+    #: Needed because `responses` holds one payload per capability, so a scenario could plant
+    #: exactly one series. `_for_subject` then returns an empty series for every other subject,
+    #: which is honest but can be actively misleading: `measurement_stopped` asserts that the
+    #: site is fine and only its *measurement* stopped, and a world where one product event has
+    #: data and every other returns nothing says the opposite — that everything stopped, which is
+    #: the site-outage reading the scenario exists to rule out.
+    #:
+    #: A real deployment has many healthy events. This lets a fixture say so.
+    subject_responses: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     #: Whether the connector's own disclosures are computed over this scenario's payloads.
     #:
     #: True by default, so a scenario sees what production would send it. It was effectively
@@ -346,6 +359,14 @@ class Scenario:
         variants = self.period_responses.get(qualified_name)
         if variants:
             return variants["after" if self._is_after(params) else "before"]
+        # Subject before period: a scenario planting several series wants the one that was asked
+        # for, and only a scenario planting *one* has a before/after to choose between.
+        by_subject = self.subject_responses.get(qualified_name)
+        if by_subject and params:
+            for key in self.SUBJECT_KEYS:
+                asked = params.get(key)
+                if isinstance(asked, str) and asked in by_subject:
+                    return by_subject[asked]
         # The two derived listings come *before* the plain lookup, and the ordering is the whole
         # point: a scenario that plants its own catalogue would otherwise bypass the derivation
         # and go back to advertising a world the rest of the fixture cannot answer for. Both
@@ -488,11 +509,26 @@ class Scenario:
         return {**base, "count": len(events), "events": events}
 
     def events_described(self) -> frozenset[str]:
-        """Event names this scenario's own trend payloads claim to be about."""
+        """Event names this scenario's own trend payloads claim to be about.
+
+        Covers `subject_responses` too, or a scenario planting only those would describe events
+        that discovery never advertises -- which is the bug this method exists to prevent,
+        reintroduced through the newer field.
+        """
         found = set()
-        sources = list(self.responses.values()) + [
-            variant for variants in self.period_responses.values() for variant in variants.values()
-        ]
+        sources = (
+            list(self.responses.values())
+            + [
+                variant
+                for variants in self.period_responses.values()
+                for variant in variants.values()
+            ]
+            + [
+                payload
+                for by_subject in self.subject_responses.values()
+                for payload in by_subject.values()
+            ]
+        )
         for response in sources:
             if isinstance(response, dict) and isinstance(response.get("event"), str):
                 found.add(response["event"])
@@ -1663,9 +1699,16 @@ def measurement_stopped(seed: int = 6) -> Scenario:
     **Two independent lines, because one is not enough.** DOE-NE-STD-1004-92 is blunt about this:
     two independent lines of evidence, or the tree does not narrow. Noticing that GA4 stops on the
     3rd establishes only that GA4 stops on the 3rd -- it cannot distinguish a measurement failure
-    from a site that genuinely went dark. PostHog is the second line: signups keep arriving at
-    their usual rate through the 15th, which is impossible if traffic actually stopped. The pair
-    is what makes "the tag broke" an evidenced conclusion rather than the more comfortable guess.
+    from a site that genuinely went dark. PostHog is the second line: both signups and pageviews
+    keep arriving at their usual rate through the 15th, which is impossible if traffic actually
+    stopped. The pair is what makes "the tag broke" an evidenced conclusion rather than the more
+    comfortable guess.
+
+    **Either PostHog series is a correct second line, and the scoring says so.** Pageviews measure
+    the same quantity GA4 lost, so they refute the collapse directly; signups are a proxy, arriving
+    only if visitors did. A report that reaches for either has corroborated, and requiring one
+    particular event name would score which series it picked rather than whether it corroborated.
+    Run 25 failed exactly that way: the answer was right, cited, and named pageviews.
 
     **A cause, not an absence.** Unlike `insufficient_evidence` this is not unanswerable, and
     unlike `partial_month_false_premise` the premise is not false -- measured sessions really did
@@ -1689,15 +1732,19 @@ def measurement_stopped(seed: int = 6) -> Scenario:
         ground_truth=GroundTruth(
             cause=(
                 "GA4 session collection stopped after 3 August; the range runs to the 15th. "
-                "Signups continued at their normal rate throughout, so traffic did not stop -- "
-                "the measurement did. The answer is the data incident, not a business cause."
+                "PostHog kept recording throughout -- pageviews and signups both -- so traffic "
+                "did not stop, the measurement did. The answer is the data incident, not a "
+                "business cause."
             ),
             required_signals=(
                 # The stop itself, however the report phrases it.
                 ("stopped", "no data after", "collection", "truncated", "ends"),
                 # And the second line, which is what turns noticing into concluding. A report
-                # naming only the gap has found a symptom and stopped.
-                ("signup", "signups"),
+                # naming only the gap has found a symptom and stopped. Any of the healthy
+                # PostHog series satisfies it: they are alternatives, not a checklist, and the
+                # dimension is scoring whether the report corroborated -- not which event it
+                # chose to corroborate with.
+                ("signup", "signups", "pageview", "pageviews"),
             ),
             decoys=("deploy", "campaign", "seasonal"),
             required_capabilities=(
@@ -1721,6 +1768,10 @@ def measurement_stopped(seed: int = 6) -> Scenario:
             # because a perfectly flat series would let a weak analyst score as well as a good
             # one -- and because the claim being supported is "unchanged", which needs a series
             # whose ordinary variation is visible.
+            #
+            # Also planted under `$pageview` in `subject_responses` below, because the world this
+            # scenario asserts is "the site is fine, its measurement stopped" -- and a world where
+            # one product event has data while every other returns nothing says the opposite.
             "posthog__event_trend": {
                 "event": "user signed up",
                 "measure": "count",
@@ -1774,7 +1825,44 @@ def measurement_stopped(seed: int = 6) -> Scenario:
                 "messages": [],
                 "authored_by": {"person": 0, "app": 0, "self": 0},
             },
-            "posthog__list_events": _event_catalogue(),
+            # No large catalogue here, deliberately, and the first version had one.
+            #
+            # It reused `_event_catalogue()` -- ninety-six events, built for
+            # `tempting_coincidence` where digesting a big catalogue *is* the test. That buried
+            # `user signed up` as one entry in ninety-seven, and both attempts of run 24 failed:
+            # one never queried a series at all, the other asked for `$pageview` and correctly
+            # got nothing. The corroboration this scenario is built on had only ever worked
+            # because the fixture used to answer any event name with the planted series.
+            #
+            # So the standing four-event default applies instead, with the planted event added to
+            # it, which leaves the analyst able to find the second line of evidence. This scenario
+            # tests whether it *corroborates*; making it also a needle-hunt through autocapture
+            # noise conflates two skills and measures neither.
+        },
+        # Every product event is healthy, because that is what "the site is fine" means. With one
+        # series planted and the rest empty, an analyst asking about pageviews is told they
+        # stopped too -- which points at a site outage, the exact reading this scenario exists to
+        # rule out. The fixture must not argue against its own ground truth.
+        subject_responses={
+            "posthog__event_trend": {
+                "$pageview": {
+                    "event": "$pageview",
+                    "measure": "count",
+                    "interval": "day",
+                    "start_date": "2026-07-16",
+                    "end_date": "2026-08-15",
+                    "breakdown_property": None,
+                    "row_count": 31,
+                    "series": [
+                        {
+                            "bucket": f"{(july + timedelta(days=offset)).isoformat()}T00:00:00",
+                            "value": round(1_450 * (1 + rng.uniform(-0.09, 0.09))),
+                        }
+                        for offset in range(31)
+                    ],
+                    "total": 44_950,
+                },
+            },
         },
     )
 
