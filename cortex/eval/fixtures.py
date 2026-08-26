@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import enum
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -243,6 +244,13 @@ class Scenario:
     #: this resolves to the `"after"` variant.
     change_date: date | None = None
 
+    #: Daily counts a trend capability derives every interval from, keyed by `tool__capability`.
+    #:
+    #: A canned payload answers `interval="day"` with whatever buckets it was typed with, so a
+    #: scenario whose trap is a monthly series answered the daily call -- the discriminating one
+    #: -- with monthly data. See `DailyTruth`.
+    daily_truth: dict[str, DailyTruth] = field(default_factory=dict)
+
     #: Responses that differ by *subject* — which event, which repository — keyed by
     #: `tool__capability` then by the subject value.
     #:
@@ -376,6 +384,12 @@ class Scenario:
             return self._repository_listing()
         if qualified_name == "posthog__list_events":
             return self._event_listing()
+        # Derived from daily counts, so the interval the caller asked for is the interval it
+        # gets. Ahead of the plain lookup for the same reason the listings are: a scenario that
+        # also planted a payload here would otherwise go back to serving one fixed granularity.
+        truth = self.daily_truth.get(qualified_name)
+        if truth is not None:
+            return _resample(truth, params, matched=self._asks_about(truth.event, params))
         if qualified_name in self.responses:
             return self._for_subject(self.responses[qualified_name], params)
         return DISCOVERY_DEFAULTS.get(qualified_name, {"rows": [], "count": 0})
@@ -433,6 +447,15 @@ class Scenario:
     #: A fixture is keyed by capability, so without this it answers every request for a series
     #: with the one series it holds -- whatever was asked for.
     SUBJECT_KEYS = ("event", "repo")
+
+    def _asks_about(self, event: str, params: dict[str, Any] | None) -> bool:
+        """True when the call named this event, or named none at all.
+
+        A call with no event still gets the series: the capability requires one in production,
+        and refusing here would turn a fixture gap into a silent empty result.
+        """
+        asked = (params or {}).get("event")
+        return not isinstance(asked, str) or asked == event
 
     #: Payload fields holding the rows a series or listing returned.
     _ROW_KEYS = ("series", "rows", "pull_requests", "deployments", "events", "messages")
@@ -511,9 +534,12 @@ class Scenario:
     def events_described(self) -> frozenset[str]:
         """Event names this scenario's own trend payloads claim to be about.
 
-        Covers `subject_responses` too, or a scenario planting only those would describe events
-        that discovery never advertises -- which is the bug this method exists to prevent,
-        reintroduced through the newer field.
+        Covers every field an event name can be planted in, not just `responses`. Each new one
+        has reintroduced the bug this method exists to prevent: moving
+        `partial_month_false_premise`'s series into `daily_truth` emptied this set, so the
+        catalogue stopped advertising `user signed up` and the analyst was told the event it
+        needed did not exist. A test asserts the invariant directly rather than trusting this
+        list to stay complete.
         """
         found = set()
         sources = (
@@ -532,6 +558,7 @@ class Scenario:
         for response in sources:
             if isinstance(response, dict) and isinstance(response.get("event"), str):
                 found.add(response["event"])
+        found.update(truth.event for truth in self.daily_truth.values())
         return frozenset(found)
 
     def repositories_described(self) -> frozenset[str]:
@@ -565,6 +592,99 @@ class Scenario:
                 except ValueError:
                     continue
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class DailyTruth:
+    """One event's daily counts, from which any requested interval is derived.
+
+    **Why a fixture needs this at all.** `posthog.event_trend` takes an `interval` and defaults
+    it to `"day"`. A canned payload cannot: it answers `interval="day"` with whatever buckets it
+    was written with, and `partial_month_false_premise` was written with three monthly ones. So
+    the analyst asked for daily granularity three times in run 26, was handed a monthly series
+    each time, never saw a run-rate, and hedged the premise to "unverifiable" -- while the
+    scenario's own comment called the daily call "the one that separates a real fall from a
+    calendar artefact". The fixture was punishing the correct query.
+
+    Deriving also removes the second copy. The monthly totals used to be typed out beside the
+    daily rates they were supposed to summarise, which is two statements of one fact.
+    """
+
+    event: str
+    #: Ordered `(day, count)`. The planted window; a request is clamped to it, so `end_date`
+    #: reports where the data really stops rather than where the caller hoped it would.
+    days: tuple[tuple[date, int], ...]
+
+
+_BUCKET_STARTS: dict[str, Callable[[date], date]] = {
+    "day": lambda d: d,
+    "week": lambda d: d - timedelta(days=d.weekday()),
+    "month": lambda d: d.replace(day=1),
+}
+
+
+def _resample(
+    truth: DailyTruth, params: dict[str, Any] | None, *, matched: bool = True
+) -> dict[str, Any]:
+    """A trend payload at the requested interval, over the requested window.
+
+    Clamped to the planted days at both ends, which is what makes the artefact *findable*: an
+    analyst asking for 1 July to 26 August is told the series ends on 12 August, and counting
+    the buckets it got back is then enough. Nothing here announces that the last month is
+    partial -- `partial_month_false_premise` deliberately withholds that disclosure, and this
+    keeps the withholding while making the honest calculation reachable.
+
+    `matched=False` is a call about some other event: an empty series, but keeping the interval
+    and the window, because an empty payload that also lost its scalars says "nothing here"
+    about an unknown question rather than about the one that was asked. The default interval is
+    `posthog.event_trend`'s own -- a fixture that echoes a different one is answering as a
+    connector this project does not have.
+    """
+    asked = params or {}
+    interval = asked.get("interval") or "day"
+    bucket_of = _BUCKET_STARTS.get(interval, _BUCKET_STARTS["day"])
+    start = _as_date(asked.get("start_date"))
+    end = _as_date(asked.get("end_date"))
+    days = (
+        [
+            (day, value)
+            for day, value in truth.days
+            if (start is None or day >= start) and (end is None or day <= end)
+        ]
+        if matched
+        else []
+    )
+    buckets: dict[date, int] = {}
+    for day, value in days:
+        key = bucket_of(day)
+        buckets[key] = buckets.get(key, 0) + value
+    planted = [day for day, _ in truth.days]
+    return {
+        # Named for what was asked, so the analyst is not left inferring which event it holds.
+        "event": asked.get("event") if not matched else truth.event,
+        "measure": "count",
+        "interval": interval,
+        # Falls back to the requested window, then to the planted one, so an empty result still
+        # reports the range it found nothing in.
+        "start_date": (days[0][0] if days else start or planted[0]).isoformat(),
+        "end_date": (days[-1][0] if days else end or planted[-1]).isoformat(),
+        "breakdown_property": None,
+        "row_count": len(buckets),
+        "series": [
+            {"bucket": f"{key.isoformat()}T00:00:00", "value": value}
+            for key, value in sorted(buckets.items())
+        ],
+        "total": sum(buckets.values()),
+    }
+
+
+def _as_date(value: Any) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
 
 
 def _daily(
@@ -1337,42 +1457,27 @@ def partial_month_false_premise(seed: int = 4) -> Scenario:
                 ),
             ),
         ),
+        # Daily counts, one per day, from which every requested interval is derived. The rates
+        # are the ground truth's own: 156.4/day through June and July, 157.0/day across the
+        # twelve days of August that exist. A monthly call still sums them into the trap -- one
+        # full month against a third of one -- and a daily call now answers at the granularity
+        # where the run-rate is visible, instead of returning three monthly buckets to a caller
+        # that asked for days.
+        daily_truth={
+            "posthog__event_trend": DailyTruth(
+                event="user signed up",
+                days=tuple(
+                    (day, round(rate * (1 + rng.uniform(-0.05, 0.05))))
+                    for first, count, rate in (
+                        (date(2026, 6, 1), 30, 156.4),
+                        (july, 31, 156.4),
+                        (august, 12, 157.0),
+                    )
+                    for day in (first + timedelta(days=offset) for offset in range(count))
+                ),
+            )
+        },
         responses={
-            # The trap, and the shape of the first call an analyst makes. Two monthly buckets,
-            # one of them a third of a month long, with nothing in the payload saying so.
-            "posthog__event_trend": {
-                "event": "user signed up",
-                "measure": "count",
-                "interval": "month",
-                "start_date": "2026-06-01",
-                "end_date": "2026-08-12",
-                "breakdown_property": None,
-                "row_count": 3,
-                "series": [
-                    {"bucket": "2026-06-01T00:00:00", "value": 4692},
-                    {"bucket": "2026-07-01T00:00:00", "value": 4849},
-                    # 12 days, not a month. 619 was the live figure; 1,884 is what 12 days at
-                    # July's rate actually produces, and using the honest number is the point:
-                    # the fixture must not smuggle in a real decline to test a false premise.
-                    {"bucket": "2026-08-01T00:00:00", "value": 1884},
-                ],
-                "total": 11425,
-                # No `partial_buckets`, deliberately, and this is now *harder* than production.
-                #
-                # The first version of this fixture carried a note saying the last bucket was
-                # incomplete, and the analyst passed three of three -- which measured whether it
-                # could read a warning, not whether it could notice a calendar artefact nobody
-                # had pointed out. `posthog.event_trend` did not emit such a note at the time,
-                # so the fixture was also simply wrong about production.
-                #
-                # It emits one now: `_bucket_coverage` returns `partial_buckets` whenever a
-                # bucket covers less than a full interval, which is the durable fix for the live
-                # failure and is tested in `tests/tools/test_posthog.py`. This fixture keeps the
-                # disclosure out anyway, because a scenario that hands over the answer stops
-                # measuring the skill -- the bucket boundaries and `end_date` are the only clues
-                # here, which is what an analyst reading an undisclosed source gets. Every other
-                # connector still looks like this.
-            },
             # The refutation, at the granularity where a run-rate is visible. Flat across both
             # months, noise only.
             "ga4__get_sessions": {
