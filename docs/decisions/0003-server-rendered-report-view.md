@@ -67,7 +67,7 @@ keeping them the contract.
   reaching a page, so everything interpolated is escaped and there is a test asserting a
   hostile claim cannot become markup. "We escape" stays true until someone adds a field.
 - The trace is derived from the `tool_calls` audit rows, so the page cannot show a history that
-  disagrees with what happened. See ADR 0002, round two.
+  disagrees with what happened. See [ADR 0002](0002-harness-mechanisms.md), round two.
 - `cortex.ask` had to start persisting a `Report` row. It never did — only the worker service
   wrote one — so every real investigation ever run through the CLI printed itself to a terminal
   and left nothing behind. Invisible until there was a page to notice it.

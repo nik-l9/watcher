@@ -1,8 +1,24 @@
 [project]
-name = "cortex"
+# The distribution name, which is not the import name: `import cortex` stays. Set for
+# publishing because `cortex` alone is not available on PyPI. Confirm before a first upload --
+# after one, the name is effectively permanent.
+name = "cortex-gtm-analyst"
 version = "0.1.0"
-description = "Cortex — AI GTM Workforce. V1 specialist: GTM Data Analyst."
+description = "An AI GTM data analyst that investigates rather than reporting numbers."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
+keywords = ["analytics", "agents", "llm", "gtm", "root-cause-analysis", "grounding"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -65,10 +81,37 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.urls]
+Homepage = "https://github.com/nik-l9/cortex"
+Repository = "https://github.com/nik-l9/cortex"
+Issues = "https://github.com/nik-l9/cortex/issues"
+
+[project.scripts]
+# The entry points an installed copy needs. `cortex-migrate` comes first in practice: the other
+# four need a schema, and an install with no repository checked out has no `alembic.ini` to run
+# against -- so the migrations ship inside the package and that command points alembic at them.
+cortex-migrate = "cortex.db.migrate:main"
+cortex-ask = "cortex.ask:main"
+cortex-spend = "cortex.spend:main"
+cortex-ingest = "cortex.ingest.__main__:main"
+cortex-connect = "cortex.connect:main"
+cortex-eval = "cortex.eval.__main__:main"
+
 [tool.hatch.build.targets.wheel]
-packages = ["cortex"]
+# `services` is packaged so an installed copy can serve the API and run the workers, not only
+# drive the CLI. It is a separate top-level package rather than a subpackage because the tests
+# and the container images both import it by that name.
+packages = ["cortex", "services"]
 # Employee contracts are data the package needs at runtime.
 artifacts = ["cortex/agents/employees/*.yaml"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Migrations are the only supported way to create the schema, so an installed copy has to carry
+# them. `Base.metadata.create_all` would be one line and a second source of truth: nothing
+# checks the two against each other, so they would drift silently and the drift would surface as
+# a production schema that no migration describes.
+"migrations" = "cortex/_migrations"
+"alembic.ini" = "cortex/_alembic.ini"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

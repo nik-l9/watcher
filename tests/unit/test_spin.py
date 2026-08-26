@@ -1,10 +1,9 @@
 """Detecting a loop that is busy without progressing.
 
-The first test is the one that matters: it is the hole the previous detector had, and it was
-found by indexing OpenHands' SDK as a graph and asking what their `StuckDetector` watches for
-that ours did not.
+The first test is the one that matters: it is the hole the previous detector had, found by
+asking which shapes of a stalled loop the existing signal could not see.
 
-Our only signal was `barren_streak` — consecutive steps that called tools and recorded no
+That signal was `barren_streak` alone — consecutive steps that called tools and recorded no
 evidence. An analyst repeating one identical call writes a *new evidence row every time*, so
 the streak reset on each one and the loop ran to its step limit. The budget eventually stopped
 it, which made the symptom a slow expensive investigation rather than an error. That is the

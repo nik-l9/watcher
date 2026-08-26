@@ -658,10 +658,10 @@ class TestCancellation:
     and nothing implemented either — there was no way to stop a running investigation, or to
     stop it spending tokens.
 
-    Cooperative, adapted from OpenHands' `CancellationToken`. Theirs is a threading flag on the
-    conversation, which works because their loop and their cancel request share a process. Ours
-    do not: the loop runs in a Celery worker and the request arrives at the gateway, so the
-    signal has to cross a process boundary. It travels through the investigation row, which
+    Cooperative rather than pre-emptive. The usual shape is a threading flag on the
+    conversation, which works when the loop and the cancel request share a process. These do
+    not: the loop runs in a Celery worker and the request arrives at the gateway, so the signal
+    has to cross a process boundary. It travels through the investigation row, which
     this codebase already treats as the authoritative state.
     """
 

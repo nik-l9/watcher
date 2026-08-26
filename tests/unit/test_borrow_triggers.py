@@ -1,17 +1,18 @@
 """The conditions under which a queued borrow becomes worth building.
 
-ADR 0002 lists three mechanisms from the OpenHands SDK that were deliberately *not* adopted,
-each with a written trigger. A trigger written in a document is a trigger nobody checks, so the
-one that can be checked mechanically is checked here.
+ADR 0002 lists three harness mechanisms deliberately *not* adopted, each with a written
+trigger. A trigger written in a document is a trigger nobody
+checks, so the one that can be checked mechanically is checked here.
 
-`SecretRegistry` is that one. Theirs exists because their agent runs arbitrary bash in a sandbox
-and a tool parameter can carry a credential, so secrets have to be registered and masked. Ours
-has nothing to mask: every connector reads its credential from the vault by provider, and no
-capability accepts one as a parameter. That is a property of the tool surface rather than an
-opinion, so this test asserts it — and fails on the commit that first adds a capability taking a
-token, which is precisely the commit at which the borrow becomes worth making.
+A secret registry is that one. Such a thing exists where an agent runs arbitrary bash in a
+sandbox and a tool parameter can carry a credential, so secrets have to be registered and
+masked. This tool surface has nothing to mask: every connector reads its credential from the
+vault by provider, and no capability accepts one as a parameter. That is a property of the tool
+surface rather than an opinion, so this test asserts it — and fails on the commit that first adds
+a capability taking a token, which is precisely the commit at which the borrow becomes worth
+making.
 
-The other two triggers are measurements rather than properties, and are recorded in ADR 0002
+The other two triggers are measurements rather than properties, and stay recorded in ADR 0002
 with the numbers behind them:
 
   - **Event-sourced resumable state** — trigger: an investigation running over five minutes, or
@@ -66,7 +67,7 @@ def test_no_capability_accepts_a_credential_as_a_parameter() -> None:
     ]
     assert not offenders, (
         f"these capabilities accept a credential-shaped parameter: {offenders}. "
-        "This is the trigger for adopting their SecretRegistry (ADR 0002): a secret in a tool "
+        "This is the trigger for adopting a secret registry (ADR 0002): a secret in a tool "
         "argument is written to the tool_calls audit row, shown on the report page, and kept in "
         "the model's cached context for the rest of the investigation. Read the credential from "
         "the vault by provider instead, as every existing connector does."

@@ -1,10 +1,10 @@
 """Short labels for investigations.
 
-Derived rather than generated, which is a domain difference rather than a shortcut: OpenHands
-generates titles with an LLM because a coding task can arrive as a paragraph of specification,
-and the first fifty characters of one are meaningless. A GTM question is a short sentence
-somebody typed into a box, so truncating at a word boundary beats a model — free, instant, and
-with no failure mode.
+Derived rather than generated, which is a domain difference rather than a shortcut: generating
+a title with a model earns its cost where a task arrives as a paragraph of specification and the
+first fifty characters of one are meaningless. A GTM question is a short sentence somebody typed
+into a box, so truncating at a word boundary beats a model — free, instant, and with no failure
+mode.
 
 `was_truncated` exists so that decision can be revisited on evidence rather than opinion.
 """

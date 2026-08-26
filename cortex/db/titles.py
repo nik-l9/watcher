@@ -6,12 +6,12 @@ question, not a row in a table. Nothing produced a shorter form, so any UI listi
 investigations would have had to invent one — in the frontend, where it could not be searched,
 stored, or kept stable.
 
-**Derived, not generated, and that is a domain difference rather than a shortcut.** OpenHands
-generates titles with an LLM and falls back to truncation, which is right for them: a coding
-task can arrive as a paragraph of specification, and the first fifty characters of one are
-meaningless. A GTM question is already a short human sentence someone typed into a box, so
-truncating it at a word boundary produces a better title than a model would, for free, with no
-latency and no failure mode.
+**Derived, not generated, and that is a domain difference rather than a shortcut.** Generating
+a title with a model, falling back to truncation, is the right call where a task arrives as a
+paragraph of specification and the first fifty characters of one are meaningless. A GTM
+question is already a short human sentence someone typed into a box, so truncating it at a word
+boundary produces a better title than a model would, for free, with no latency and no failure
+mode.
 
 If that ever stops being true — a question arriving as a pasted brief rather than a sentence —
 the trigger is visible: `was_truncated` says how often the raw question did not fit.
