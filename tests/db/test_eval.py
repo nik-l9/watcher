@@ -686,7 +686,7 @@ class TestHarnessEndToEnd:
     async def test_an_alternative_loop_can_be_scored_on_the_same_scenario(
         self, session: AsyncSession
     ) -> None:
-        """The seam that makes the OpenHands comparison meaningful.
+        """The seam that makes any alternative-loop comparison meaningful.
 
         Everything except the loop must stay constant — same scenario, tools, evidence
         store, drafting call, gate and verifier — or a score difference says nothing
@@ -1705,18 +1705,17 @@ class TestDiscoveryAdvertisesWhatTheFixtureCanAnswer:
     def test_planting_a_catalogue_does_not_bypass_the_derivation(self) -> None:
         """The ordering inside `response_for`, which is where the first attempt at this failed.
 
-        `tempting_coincidence` and `measurement_stopped` plant their own ninety-six-event
-        catalogue. With the plain `self.responses` lookup first, that planted listing won and the
-        derivation never ran — so the two scenarios most affected were the two still broken.
+        `tempting_coincidence` plants its own ninety-six-event catalogue, where digesting a large
+        catalogue is the test. With the plain `self.responses` lookup first, that planted listing
+        won and the derivation never ran — leaving the scenario most affected still broken.
         """
-        for name in ("tempting_coincidence", "measurement_stopped"):
-            scenario = by_name(name)
-            assert "posthog__list_events" in scenario.responses, name
-            listing = scenario.response_for("posthog__list_events")
-            planted = len(scenario.responses["posthog__list_events"]["events"])
-            # The planted contents survive, with the described event added to them.
-            assert len(listing["events"]) == planted + 1
-            assert scenario.events_described() <= {e["name"] for e in listing["events"]}
+        scenario = by_name("tempting_coincidence")
+        assert "posthog__list_events" in scenario.responses
+        listing = scenario.response_for("posthog__list_events")
+        planted = len(scenario.responses["posthog__list_events"]["events"])
+        # The planted contents survive, with the described event added to them.
+        assert len(listing["events"]) == planted + len(scenario.events_described())
+        assert scenario.events_described() <= {e["name"] for e in listing["events"]}
 
 
 class TestAFixtureAnswersOnlyWhatItWasAsked:
@@ -1777,3 +1776,47 @@ class TestAFixtureAnswersOnlyWhatItWasAsked:
         planted = scenario.responses["posthog__event_trend"]
         assert scenario.response_for("posthog__event_trend", {}) == planted
         assert scenario.response_for("posthog__event_trend", None) == planted
+
+
+class TestAFixtureMustNotArgueAgainstItsOwnGroundTruth:
+    """`measurement_stopped` asserts the site is fine and only its measurement stopped.
+
+    With one series planted and every other event empty, an analyst asking about pageviews is
+    told they stopped too — which points at a site outage, the exact reading the scenario exists
+    to rule out. Both attempts of run 24 failed here: one never queried a series, the other asked
+    for `$pageview` and got nothing.
+
+    A real deployment has many healthy events, so `subject_responses` lets the fixture say so.
+    """
+
+    def test_more_than_one_product_event_is_healthy(self) -> None:
+        scenario = by_name("measurement_stopped")
+        for event in ("user signed up", "$pageview"):
+            series = scenario.response_for("posthog__event_trend", {"event": event})["series"]
+            assert len(series) == 31, event
+            assert series[-1]["bucket"].startswith("2026-08-15"), event
+
+    def test_they_run_past_the_date_ga4_stops(self) -> None:
+        """The whole argument. GA4 stops on the 3rd; PostHog carrying on to the 15th is what makes
+        "the measurement broke" evidenced rather than the more comfortable of two guesses."""
+        scenario = by_name("measurement_stopped")
+        rows = scenario.responses["ga4__get_sessions"]["rows"]
+        ga4_last = max(r["dimensions"]["date"] for r in rows)
+        assert ga4_last == "2026-08-03"
+        posthog = scenario.response_for("posthog__event_trend", {"event": "$pageview"})
+        assert max(r["bucket"][:10] for r in posthog["series"]) == "2026-08-15"
+
+    def test_the_planted_event_is_findable_rather_than_buried(self) -> None:
+        """The first version reused the ninety-six-event catalogue built for
+        `tempting_coincidence`, which made finding the one useful event a needle-hunt and
+        conflated two skills. This scenario tests corroboration, not catalogue digestion."""
+        catalogue = by_name("measurement_stopped").response_for("posthog__list_events")
+        assert len(catalogue["events"]) <= 8
+        assert "user signed up" in {e["name"] for e in catalogue["events"]}
+
+    def test_a_subject_response_is_still_advertised_by_discovery(self) -> None:
+        """The invariant, reintroduced through the newer field if `events_described` missed it."""
+        scenario = by_name("measurement_stopped")
+        assert "$pageview" in scenario.events_described()
+        advertised = {e["name"] for e in scenario.response_for("posthog__list_events")["events"]}
+        assert scenario.events_described() <= advertised
