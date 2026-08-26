@@ -245,7 +245,7 @@ wheels = [
 ]
 
 [[package]]
-name = "cortex"
+name = "cortex-gtm-analyst"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
