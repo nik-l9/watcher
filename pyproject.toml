@@ -24,11 +24,25 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.23",
     "google-auth>=2.35",
-    "anthropic>=0.69",
+    # Upper bound is deliberate, like the redis one above. anthropic 1.0.0 moves to `httpx2`
+    # and rejects the `httpx.AsyncClient` this code injects for timeouts and limits:
+    # "Expected an instance of `httpx2.AsyncClient`". A clean install resolved 1.0.0 and 45
+    # tests failed on a tree whose development venv, holding 0.120.2, passed everything.
+    # Lifting the bound is a migration, not a version bump.
+    "anthropic>=0.69,<1.0",
     "pyyaml>=6.0",
     "duckdb>=1.5.5",
     "pyjwt[crypto]>=2.10",
     "matplotlib>=3.11.1",
+    # Parses SQL for `cortex/tools/sqlguard.py`, which is what makes a parameterised query
+    # against a warehouse safe to run. Imported at module level and undeclared until now: it
+    # happened to be present in one development venv, so the suite passed there and a clean
+    # install failed to collect two test modules.
+    "sqlglot>=27",
+    # Slack Socket Mode's transport, in `cortex/inbound/socket_mode.py`. Reached this tree
+    # only as an extra of `uvicorn[standard]`, which means an inbound transport depended on
+    # another package's optional extra to exist.
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +52,10 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.7",
     "psycopg[binary]>=3.2",
+    # `tests/reports/test_schema.py` reads `MaxLen` out of pydantic field metadata to assert
+    # a cap. Guaranteed present as a pydantic requirement, declared anyway: a direct import
+    # of another package's dependency is a dependency.
+    "annotated-types>=0.7",
 ]
 
 [build-system]

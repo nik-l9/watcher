@@ -9,7 +9,11 @@ help:
 
 setup:  ## Create the venv, install deps, write .env if absent
 	uv venv --python 3.12
-	uv pip install -e ".[dev]"
+	# Targeted explicitly: `uv pip install` honours an already-active VIRTUAL_ENV over the
+	# venv just created, so with any other environment active this installs somewhere else
+	# and reports success. The symptom is `make test` failing with "No module named pytest"
+	# straight after a setup that printed the whole dependency list.
+	uv pip install --python .venv/bin/python -e ".[dev]"
 	@test -f .env || (cp .env.example .env && \
 		$(PY) -c "import base64,os,pathlib;p=pathlib.Path('.env');p.write_text(p.read_text().replace('CORTEX_VAULT_MASTER_KEY=','CORTEX_VAULT_MASTER_KEY='+base64.urlsafe_b64encode(os.urandom(32)).decode()))" && \
 		echo "wrote .env with a fresh vault master key")
