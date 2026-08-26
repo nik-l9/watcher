@@ -50,7 +50,10 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
-    "ruff>=0.7",
+    # Exact, not a range. A formatter decides what "formatted" means, so a range makes that
+    # property unstable: 0.16.0 and 0.16.4 disagreed about two files in this tree, which is
+    # enough for CI to fail a branch a developer had just formatted. Bump deliberately.
+    "ruff==0.16.4",
     "psycopg[binary]>=3.2",
     # `tests/reports/test_schema.py` reads `MaxLen` out of pydantic field metadata to assert
     # a cap. Guaranteed present as a pydantic requirement, declared anyway: a direct import
