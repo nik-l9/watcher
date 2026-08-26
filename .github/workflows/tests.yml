@@ -72,8 +72,13 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # Writes .env with a freshly generated vault master key, which the credential vault
-      # requires before anything can be encrypted or decrypted.
+      # A lockfile that has drifted from pyproject.toml is worse than none: `uv sync` would
+      # quietly re-resolve and CI would stop testing the versions the lock names.
+      - name: Check the lockfile is current
+        run: uv lock --check
+
+      # `uv sync` from the lock, plus a .env carrying a freshly generated vault master key,
+      # which the credential vault requires before anything can be encrypted or decrypted.
       - name: Set up the environment
         run: make setup
 
