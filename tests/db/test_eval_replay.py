@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortex.agents.timing import GATE, SUFFICIENCY, VERIFY, Phase, Timings
 from cortex.db.models import (
     Evidence,
     Investigation,
@@ -48,10 +49,27 @@ from cortex.tools.executor import canonical_hash
 
 
 class _Investigation:
-    """The three fields the scorer reads off an investigation."""
+    """The fields the scorer reads off an investigation.
+
+    The phase clock is here rather than left off because `test_every_dimension_matches_the
+    _original` was passing vacuously without it: with no clock on either side, `latency` fell
+    back to `duration_ms` in both the live and the replayed score and the two agreed by
+    construction. Replay was in fact scoring the loop alone -- 0.47 live against 1.00 on
+    re-score for one real attempt -- and the test that exists to catch exactly that could not
+    see it. So the stub carries post-loop phases, which is what makes the two paths differ if
+    replay stops rebuilding them.
+    """
 
     duration_ms = 88_000
     steps_used = 6
+    timings = Timings(
+        phases={
+            "loop_model": Phase(calls=4, seconds=70.0),
+            GATE: Phase(calls=1, seconds=0.01),
+            VERIFY: Phase(calls=1, seconds=12.0),
+            SUFFICIENCY: Phase(calls=1, seconds=9.0),
+        }
+    )
 
     class usage:  # noqa: N801 - mirrors the real attribute name
         total = 41_000

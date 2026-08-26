@@ -882,10 +882,13 @@ class Scorer:
         exactly the phases Phase 1 added to. Every "under budget" claim this suite has made
         about a run with post-loop phases was measuring the wrong interval.
 
-        Falls back to `duration_ms` when no phase clock is available, which is how a replayed
-        bundle looks -- replay reconstructs the fields the scorer reads rather than re-running
-        the phases, so there is nothing to time. A bundle written before phases were captured
-        scores exactly as it did originally, which keeps it comparable with its own run.
+        Falls back to `duration_ms` when no phase clock is available. A replayed bundle carries
+        one -- rebuilt from the phase seconds it stored -- so re-scoring reports the same latency
+        the run did. It did not, once: the same attempt scored 0.47 live and 1.00 on re-score,
+        and since replay is what a grader change is checked with, a replay that reads better than
+        the run is the more expensive of the two errors. A bundle written before phases were
+        captured has nothing to rebuild from and still scores as it did originally, which keeps
+        it comparable with its own run.
         """
         measured = _wall_clock_ms(investigation)
         ratio = measured / self._latency_budget_ms
