@@ -319,11 +319,11 @@ class Investigator:
         # from a hung one, which has already cost real debugging time here -- but losing an
         # event must never affect the investigation, so every emit is guarded.
         self._progress = progress
-        # Asked once per step. Cooperative, like OpenHands' CancellationToken, but it has to
-        # cross a process boundary: their loop and their cancel request are in one process,
-        # while ours runs in a Celery worker and the request arrives at the gateway. So the
-        # check reads shared state rather than a threading flag -- and the state it reads is
-        # the investigation row, which this codebase already treats as authoritative.
+        # Asked once per step. Cooperative rather than pre-emptive, and it has to cross a
+        # process boundary: the loop runs in a Celery worker while the cancel request arrives
+        # at the gateway, so a threading flag on the conversation -- the usual shape -- cannot
+        # see it. The check reads shared state instead, and the state it reads is the
+        # investigation row, which this codebase already treats as authoritative.
         self._cancelled = cancelled
         # Injectable so the wall-clock budget can be tested deterministically. A
         # test that reached the time limit by actually sleeping would be slow and

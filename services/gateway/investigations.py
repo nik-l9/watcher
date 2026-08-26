@@ -333,15 +333,16 @@ async def get_investigation_trace(
     """What the analyst actually did, in order.
 
     **Derived from the `tool_calls` audit rows rather than from a stored event stream**, and
-    that is the design decision worth stating. Indexing the OpenHands frontend showed the
-    split their UI settled on: a REST-served backlog for history plus a socket carrying only
-    new events, because a transport that guarantees neither ordering nor completeness cannot
-    be asked to reconstruct the past.
+    that is the design decision worth stating. The split streaming UIs converge on is a
+    REST-served backlog for history plus a socket carrying only new events, because a
+    transport that guarantees neither ordering nor completeness cannot be asked to
+    reconstruct the past.
 
-    Ours goes one step further. Their backlog is a persisted event log — a second record of
-    what happened, which can disagree with the first. Every tool call here already writes an
-    immutable audit row, so the backlog *is* the audit trail: it cannot drift from what
-    happened, it survives a worker restart, and it needed no new table. The progress queue
+    This goes one step further. That backlog is normally a persisted event log — a second
+    record of what happened, which can disagree with the first. Every tool call here already
+    writes an immutable audit row, so the backlog *is* the audit trail: it cannot drift from
+    what happened, it survives a worker restart, and it needed no new table. The progress
+    queue
     stays what its own docstring always said it was — advisory, describing the current
     moment, with the durable record elsewhere.
 

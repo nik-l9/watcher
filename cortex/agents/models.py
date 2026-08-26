@@ -24,13 +24,12 @@ Each of those fails at the moment a report is drafted, which is the most expensi
 in an investigation to discover a configuration error. Declaring the facts turns all of
 them into a `ValueError` at construction instead.
 
-Adapted from OpenHands' `model_features.py` (feature flags matched against model names)
-and `verified_models.py` (a curated list per provider). Two deliberate differences:
+Two choices worth stating, because the obvious implementation makes the opposite one:
 
-  - **Exact ids, not name patterns.** Their registry has to cope with hundreds of models
-    from dozens of providers reached through LiteLLM, so pattern matching is the only
-    option. We run one provider and a handful of models, where a pattern's failure mode —
-    a new model quietly matching a rule written for an older one — is pure downside.
+  - **Exact ids, not name patterns.** A registry spanning hundreds of models from dozens of
+    providers has no option but to match patterns. This one runs a single provider and a
+    handful of models, where a pattern's failure mode — a new model quietly matching a rule
+    written for an older one — is pure downside.
   - **No `supports_function_calling` flag.** Every model here has it, and a flag that is
     always true documents nothing while inviting a caller to branch on it.
 

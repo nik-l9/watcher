@@ -2,7 +2,7 @@
 
 **Status:** accepted 2026-08-23; every decision below has working code except the ask
 lifecycle in decision 9, whose free half is shipped and whose expensive half is deliberately
-deferred — see `docs/rollout-plan.md` for what each cost against its estimate.
+deferred.
 **Question it answers:** we have fixed the same class of bug four times, each time by adding
 another disclosure to a connector. What is the actual root cause, and what replaces the fifth patch?
 
@@ -39,14 +39,16 @@ that change the design:
 mechanisms: **presence bias** — reading absence of activity as normality — and
 **context-induced confidence**, where supplying any context collapses abstention (one model:
 84.1% → 52%). We hit both: thirteen series went silent, "no rows" read as "nothing to see," and
-a pile of unrelated tool results licensed a confident answer. See `llm-rca.md` §1.5, §4.1.
+a pile of unrelated tool results licensed a confident answer. The surviving rule is in
+[`method.md`](../method.md) §7: context is sufficient when it *plausibly supports* a definitive
+answer, and a gate demanding nothing passes everything.
 
 **2. Everything measured to work adds structure *outside* the model.** A second independent
 call, a fresh context, a vote, a narrower tool. Everything measured to fail asks the same model,
 in the same context, to try harder. Intrinsic self-correction is **measurably negative** (GPT-4
 on GSM8K 95.5 → 89.0); vanilla reflection in RCA specifically is −2%; multi-agent debate loses
 to plain majority voting at equal budget (83.0 vs 88.2). All three were on the list of things to
-try. See `llm-rca.md` §5.6.
+try, and each was dropped on those measurements.
 
 **3. Kepner-Tregoe's IS-NOT column is the check we were missing, and it is codeable.** Of seven
 RCA frameworks surveyed, KT-PA scores HIGH on codeability because its specification matrix is a
@@ -60,14 +62,16 @@ fixed schema and its elimination step is a set predicate. Filled in honestly for
 | **Extent** | 13 event types, all server-side | 0 client-side event types |
 
 The candidate "pageview collapse" is tested against the WHEN row and dies: it cannot explain
-signups being at zero on 08-04 while pageviews were healthy. See `rca-frameworks.md` §1.5.
+signups being at zero on 08-04 while pageviews were healthy — the correlated-cessation shape
+in [`method.md`](../method.md) §4, and the one check permitted to block outright.
 
 **4. Asking the user is worth far less than it feels like it should be.** ConDABench (1,420
 problems) reports verbatim that "Longer Conversations are not always better"; heavy clarifiers
 show elevated unnecessary-response rates. And a model cannot estimate its own need to clarify —
 six independent measurements agree (clarification-need F1 0.33-0.37; one benchmark's R² is
-*negative*, worse than a constant; ambiguity-detection 54%). See `clarifying-questions.md` §1.4,
-§4.1.
+*negative*, worse than a constant; ambiguity-detection 54%). What replaces asking is in
+[`method.md`](../method.md) §8: state the reading you took, which a reader corrects in a line,
+where a question blocks the whole investigation on a reply that may never come.
 
 ## Decision
 
@@ -200,8 +204,9 @@ Decision 1's gate asks whether the instrument worked. This one asks a different 
 also has to be answered before a cause is named: **given what we can observe, is a causal claim
 available at all?** Both are needed, and neither substitutes for the other.
 
-`metric-attribution.md` derives a gate of eight predicates (G0-G7) a program can evaluate, two of
-which run **on the shapes alone, before any values are read**. Applied to our own signup series it
+The attribution work behind this derives a gate of eight predicates (G0-G7) a program can
+evaluate — `cortex/analysis/identifiability.py` is where they live — two of which run **on the
+shapes alone, before any values are read**. Applied to our own signup series it
 produces the finding that matters most for this ADR:
 
 > **We have zero admissible control series.** Abadie's placebo p-value is
@@ -413,8 +418,8 @@ cleverer prompt. Also unresolved: real evidential independence, since in a singl
 architecture "two ways you know it" is usually two views of one source. Decision 3 is weaker than
 it looks for that reason.
 
-`data-trust-gate.md` is complete, and decision 1's thresholds above are taken from it. Its
-severity model is worth noting because it inverts the obvious design: **severity comes from the
+Decision 1's thresholds above come from the data-trust work, whose severity model is worth
+noting because it inverts the obvious design: **severity comes from the
 asset's declared consumers, not from which check tripped.** A freshness failure on a series
 nothing reads is not an incident. Blast radius is *reported and never thresholded* — the
 published mechanism everywhere is declared consumers plus a graph walk, and nobody publishes a

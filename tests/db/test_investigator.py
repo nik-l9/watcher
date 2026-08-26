@@ -1110,9 +1110,9 @@ class TestPriorContextFromMemory:
 class TestCancellation:
     """Cooperative, and it has to cross a process boundary.
 
-    OpenHands' `CancellationToken` is a threading flag on the conversation, which works because
-    their loop and their cancel request share a process. Ours do not: the loop runs in a Celery
-    worker and the request arrives at the gateway. So the check reads shared state — and it is
+    The usual shape is a threading flag on the conversation, which works when the loop and the
+    cancel request share a process. These do not: the loop runs in a Celery worker and the
+    request arrives at the gateway. So the check reads shared state — and it is
     asked *before* the model call, because checking after it would take the cancellation and
     still pay for the turn.
     """

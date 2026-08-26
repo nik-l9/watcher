@@ -38,7 +38,7 @@ Tenant isolation, grounding, and the audit trail are all properties *of the
 database and the graph engine*, not of our code in isolation. A mocked evidence
 store would happily confirm a citation the real one rejects, and a fake graph would
 "prove" an isolation guarantee FalkorDB does not provide. Three findings in
-`security-findings.md` were only reachable against a live engine — F-05 (`NaN`
+[`findings.md`](findings.md) were only reachable against a live engine — F-05 (`NaN`
 rejected by `jsonb`), the FalkorDB "empty key" phrasing, and F-01's cross-tenant
 evidence injection.
 
@@ -109,7 +109,7 @@ decoration.
 
 ## Regression tests
 
-Every finding in `security-findings.md` has a test named for it. The critical one
+Every finding in [`findings.md`](findings.md) has a test named for it. The critical one
 also has a standalone attack script that was run before and after the fix:
 `ToolExecutor` accepted any `investigation_id`, the probe wrote attacker evidence
 onto a victim's investigation, and after the fix the same unmodified probe returns

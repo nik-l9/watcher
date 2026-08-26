@@ -6,18 +6,17 @@ that it is finished — and everything downstream verifies *what the report says
 the adversarial verifier, and answer less than was asked. The eval catches that on fixtures
 through `required_signals`; production had no equivalent.
 
-Adapted from OpenHands' `conversation/goal/judge.py`, found by indexing their SDK. Their
-judge is a pure `objective + transcript -> verdict` evaluator returning a score, a `complete`
-flag and a description of what remains, and their prompt is the instructive part:
+So this is a judge: a pure `objective + report -> verdict` evaluator returning a score, a
+`complete` flag and a description of what remains. The instruction it runs on is the load-
+bearing part —
 
 > Derive the concrete requirements implied by the objective. For EACH requirement, look for
-> authoritative evidence in the transcript. Treat missing, uncertain, or
-> merely-claimed-but-unverified evidence as NOT satisfied.
+> authoritative evidence. Treat missing, uncertain, or merely-claimed-but-unverified evidence
+> as NOT satisfied.
 
-Their authoritative evidence is file contents and test output. Ours is stronger: a claim is
-only in the delivered report if its citation resolved to an immutable, hashed evidence row. So
-this judge reads the *delivered* report rather than the transcript — what survived, not what
-was drafted.
+— and what counts as authoritative here is unusually strong: a claim is only in the delivered
+report if its citation resolved to an immutable, hashed evidence row. So the judge reads the
+*delivered* report rather than the working transcript: what survived, not what was drafted.
 
 **It discloses; it never edits.** This is an LLM's opinion, and the rule in this codebase is
 that grounding and accuracy are decided mechanically. So an incomplete verdict adds a caveat a

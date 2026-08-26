@@ -259,10 +259,9 @@ class TestTheSequenceAConsumerDedupsOn:
 
     The original design was for a terminal: it prints each line as it arrives and never
     reconnects, so an unnumbered stream is fine. A UI is a different consumer — it drops out,
-    comes back, and receives some frames twice while missing others. Indexing the OpenHands
-    frontend surfaced their handling of exactly this: their store dedups by event id and
-    skips side-effects for events already seen, with a comment citing their own issue about a
-    reconnect replaying a backlog from a stale anchor.
+    comes back, and receives some frames twice while missing others. The handling streaming
+    UIs converge on is the same shape every time: dedup by event id, and skip side-effects for
+    events already seen, because a reconnect replays the backlog from a stale anchor.
 
     Without a sequence, two identical "step 5 calling github__commits" frames are
     indistinguishable from one call reported twice, and a missing frame is invisible.

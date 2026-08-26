@@ -72,8 +72,15 @@ cannot occupy the slots a waiting user needs.
 
 ## Quickstart
 
+Two ways in. Both need the four datastores running, because this is a stateful system: an
+evidence store a claim can be checked against, a graph, a vector store, and a queue.
+
+### Fork it and run it
+
+The path to take if you want to change anything, and the one CI runs.
+
 ```bash
-make setup      # venv + deps + .env with a generated vault key
+make setup      # venv + deps from the lockfile + .env with a generated vault key
 make up         # infrastructure only: Postgres, FalkorDB, Qdrant, Redis
 make migrate    # apply schema
 make test       # full suite
@@ -81,8 +88,42 @@ make up-all     # + gateway, both workers, scheduler → http://localhost:8000/r
 make eval       # score the analyst against labeled fixtures (spends tokens)
 ```
 
-Infrastructure and application services are split by compose profile so
-test-driven work does not wait on image builds.
+Infrastructure and application services are split by compose profile so test-driven work does
+not wait on image builds. `make setup` installs from `uv.lock`, so you get the versions this
+project was tested against rather than whatever resolves today.
+
+### Install it as a package
+
+The path to take if you want to use the analyst rather than work on it. The import name is
+`cortex`; the distribution is `cortex-gtm-analyst`.
+
+```bash
+pip install cortex-gtm-analyst
+
+cp .env.example .env        # then fill in your keys — see "What you need" above
+cortex-migrate              # create the schema (migrations ship inside the package)
+cortex-ask --real --tenant acme "Why did signups fall last week?"
+```
+
+You still supply the datastores. The compose file in this repository is the quickest way, and
+`.env.example` documents the four connection settings if you already run them elsewhere.
+
+| Command | What it does |
+|---|---|
+| `cortex-migrate` | Apply the schema. Run this first; the rest need it |
+| `cortex-ask` | Ask a question and print the report |
+| `cortex-connect` | Store a tenant's connector credentials in the vault |
+| `cortex-ingest` | Sync a connector now, rather than waiting for the nightly run |
+| `cortex-spend` | What each tenant is costing |
+| `cortex-eval` | Score the analyst against labelled fixtures |
+
+The API and the Slack transport are packaged too. The gateway is an app *factory* rather than a
+module-level instance, so that tests can build isolated apps — which means uvicorn needs
+`--factory`:
+
+```bash
+uvicorn --factory services.gateway.app:create_app --port 8000
+```
 
 ### Local ports
 
@@ -213,4 +254,6 @@ Two things matter more than style here:
    failure and what it cost. If you fix something that went wrong, write down what it was —
    that is the part a future reader cannot reconstruct.
 
-`make test` and `make lint` before a PR.
+`make test` and `make lint` before a PR. CI runs both against the real datastores.
+
+Found a security issue? [`SECURITY.md`](SECURITY.md) — please not a public issue.
