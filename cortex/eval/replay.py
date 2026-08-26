@@ -35,6 +35,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortex.agents.llm import Usage
+from cortex.agents.timing import Phase, Timings
 from cortex.db.models import Evidence, Investigation, InvestigationStatus, Tenant, ToolCall
 from cortex.memory.naming import graph_name_for_new_tenant
 from cortex.reports.gate import GateResult, Rejection, RejectionReason
@@ -212,10 +214,10 @@ async def write_bundle(
 def _phase_json(timings: Any) -> dict[str, dict[str, float]]:
     """Per-phase seconds, calls and tokens, flattened for a bundle.
 
-    Empty when an investigation carried no clock, which is how a replayed bundle looks: replay
-    reconstructs the three fields the scorer reads and does not re-run the phases, so there is
-    nothing to time. Returning `{}` rather than zeros keeps "not measured" distinguishable from
-    "measured as instant".
+    Empty when an investigation carried no clock. Returning `{}` rather than zeros keeps "not
+    measured" distinguishable from "measured as instant" -- which is the distinction the latency
+    dimension's fallback turns on, since a bundle with no clock must score against the loop
+    alone rather than against a wall clock invented from zeros.
     """
     phases = getattr(timings, "phases", None)
     if not phases:
@@ -353,6 +355,7 @@ async def replay_bundle(
         tokens=bundle.tokens,
         steps_used=bundle.steps_used,
         report=report,
+        phases=dict(bundle.phases),
     )
 
     gate_result = GateResult(
@@ -405,16 +408,40 @@ class _Usage:
 
 @dataclass(slots=True)
 class _Replayed:
-    """The three investigation fields the scorer reads, and nothing else."""
+    """The investigation fields the scorer reads, and nothing else."""
 
     duration_ms: int
     tokens: int
     steps_used: int
     report: InvestigationReport
+    #: Rebuilt from the bundle so `latency` scores the interval a reader waited rather than
+    #: the loop alone. `duration_ms` stops when the loop returns, and the gate, verifier and
+    #: sufficiency gate all run after it — 66.9 seconds of one measured 137-second attempt.
+    #: Without this the same run scored 0.47 live and 1.00 on re-score, and the replay path is
+    #: exactly what a grader change is checked with, so it must not read better than the run.
+    phases: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @property
     def usage(self) -> _Usage:
         return _Usage(total=self.tokens)
+
+    @property
+    def timings(self) -> Timings | None:
+        """None when the bundle carried no clock, which is how one written before phase
+        capture looks. The scorer falls back to `duration_ms` there, so such a bundle still
+        scores exactly as it did on its own run and stays comparable with it."""
+        if not self.phases:
+            return None
+        return Timings(
+            phases={
+                name: Phase(
+                    calls=int(entry.get("calls", 0)),
+                    seconds=float(entry.get("seconds", 0.0)),
+                    usage=Usage(output_tokens=int(entry.get("output_tokens", 0))),
+                )
+                for name, entry in self.phases.items()
+            }
+        )
 
 
 def _evidence_json(row: Any) -> dict[str, Any]:
