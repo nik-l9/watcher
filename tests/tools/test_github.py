@@ -291,9 +291,7 @@ class TestSchemas:
         schema = tool.capability("recent_prs").params_schema
         assert schema["properties"]["repo"]["pattern"] == REPO_PATTERN
 
-    @pytest.mark.parametrize(
-        "repo", ["acme/web", "acme/acme", "a-b/c_d.e", "x1/y2", "a/b"]
-    )
+    @pytest.mark.parametrize("repo", ["acme/web", "acme/acme", "a-b/c_d.e", "x1/y2", "a/b"])
     def test_repo_pattern_accepts_real_repositories(self, repo: str) -> None:
         # Owners are alphanumeric plus hyphen; names may also contain _ and .
         assert re.match(REPO_PATTERN, repo), repo

@@ -1,0 +1,96 @@
+# The suite runs against real datastores rather than mocks, so CI starts real ones. Tenant
+# isolation is the property most worth proving here, and a mocked graph would happily "prove" a
+# guarantee the real engine does not provide.
+#
+# Ports match `.env.example` — 5433, 6380, 6381 — because Cortex avoids the defaults: a developer
+# machine usually already has Postgres on 5432, and FalkorDB speaks the Redis protocol, so a
+# shadowed port surfaces as a baffling `unknown command 'GRAPH.QUERY'` rather than a connection
+# error.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cortex
+          POSTGRES_PASSWORD: cortex
+          POSTGRES_DB: cortex
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U cortex -d cortex"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6381:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+      # No health check: the image carries no shell to run one, so readiness is polled below
+      # instead of being declared here and silently passing.
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Writes .env with a freshly generated vault master key, which the credential vault
+      # requires before anything can be encrypted or decrypted.
+      - name: Set up the environment
+        run: make setup
+
+      - name: Wait for Qdrant
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:6333/readyz > /dev/null; then
+              echo "qdrant ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "qdrant did not become ready"; exit 1
+
+      - name: Lint
+        run: make lint
+
+      # `make test-tenancy` is a subset of this, and the isolation gate it names must pass before
+      # any real credential is entered. Running the whole suite covers it.
+      - name: Test
+        run: make test

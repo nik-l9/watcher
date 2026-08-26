@@ -87,9 +87,7 @@ async def open_connection_url(token: str, *, client: httpx.AsyncClient | None = 
     owned = client is None
     http = client or httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
     try:
-        response = await http.post(
-            CONNECTIONS_OPEN, headers={"Authorization": f"Bearer {token}"}
-        )
+        response = await http.post(CONNECTIONS_OPEN, headers={"Authorization": f"Bearer {token}"})
         # Slack answers `ok: false` inside an HTTP 200, so the status code says nothing on its
         # own -- a lesson this codebase already paid for on the outbound side.
         body = response.json() if response.content else {}
