@@ -163,4 +163,4 @@ the test stack makes for Postgres and FalkorDB.
   is anything to recall would add a step to every investigation that always returns
   "nothing recalled". It is one injection point when M4 lands.
 - **No age-based expiry.** Tenant deletion drops the collections; there is no retention
-  policy. Tracked in `security-findings.md`.
+  policy, and it is a standing item rather than a closed one.

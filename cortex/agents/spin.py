@@ -1,11 +1,10 @@
 """Detecting a loop that is busy but not progressing.
 
-Adapted from OpenHands' `StuckDetector`, which was found by indexing their SDK as a graph
-and asking it structural questions rather than by reading files. Their detector watches for
-five patterns — repeated action-observation cycles, repeated action-error cycles, agent
-monologue, alternating patterns, and context-window errors — against configurable thresholds.
+A loop can be spending tokens and making calls while getting nowhere, and the shapes that
+indicate it are recognisable: the same action repeated, the same error repeated, the same
+observation coming back, and a run producing nothing new at all.
 
-**Why Cortex needed it.** Our only stall signal was `barren_streak`: consecutive steps that
+**Why Cortex needs it.** Our only stall signal was `barren_streak`: consecutive steps that
 called tools and produced no evidence. That has a hole big enough to drive an investigation
 through. An analyst that calls the *same capability with the same parameters* four times in a
 row writes a new evidence row each time, so the streak resets on every one of them and the
@@ -13,18 +12,17 @@ loop runs to its step limit doing nothing. The budget eventually stops it, which
 symptom is a slow expensive investigation rather than an error — the worst way to fail,
 because it looks like work.
 
-**What we watch, and why it differs from theirs.** Their signals are shaped by a coding agent:
-a monologue matters when an agent talks instead of editing, and an alternating pattern matters
-when it flips between two files. Ours are shaped by evidence gathering:
+**What we watch.** The signals are shaped by evidence gathering rather than by editing code,
+which is what makes them specific to this loop -- a monologue matters when an agent talks
+instead of acting, and neither that nor an alternating edit pattern says anything here:
 
-  - **The same call repeated.** `(capability, parameters)` identical to a recent call. This is
-    the pattern their `action_observation` threshold catches, and the one our streak missed.
+  - **The same call repeated.** `(capability, parameters)` identical to a recent call. The
+    pattern the barren streak missed, and the most common way a loop stalls.
   - **The same observation returned.** Identical `payload_hash` seen repeatedly, even from
     different calls. Two different queries returning byte-identical results means the analyst
     is circling, and the hash is already computed and indexed for the grounding gate.
-  - **Repeated failure of the same call.** Their `action_error` pattern. A capability failing
-    the same way three times will fail the fourth; the credential is wrong or the parameters
-    are.
+  - **Repeated failure of the same call.** A capability failing the same way three times will
+    fail the fourth; the credential is wrong or the parameters are.
   - **No new evidence at all.** The original `barren_streak`, kept because it catches the
     distinct case of a loop calling tools that all error.
 

@@ -8,11 +8,10 @@ investigation, after the tokens were spent, naming no turn.
 That instance was fixed a while ago. The *class* was not: nothing stated the invariant, so the
 next change to transcript construction could reintroduce it. These tests state it.
 
-The design is borrowed from OpenHands' `View` properties, which pair an `enforce` step with
-*manipulation indices* marking where the list may be cut. `safe_cut_points` is that second
-half, and it exists before condensation does — because the first thing a naive truncation does
-is cut a tool call away from its result, and that failure is far harder to attribute than the
-original was.
+Each invariant pairs an `enforce` step with *manipulation indices* marking where the list may
+be cut. `safe_cut_points` is that second half, and it exists before condensation does — because
+the first thing a naive truncation does is cut a tool call away from its result, and that failure
+is far harder to attribute than the original was.
 """
 
 from __future__ import annotations

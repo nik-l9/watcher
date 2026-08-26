@@ -1,15 +1,12 @@
 """Invariants the transcript must satisfy before it is sent to a provider.
 
-Borrowed in design from OpenHands' `View` and its `ViewPropertyBase` properties, found by
-indexing their SDK as a graph. Their idea, and it is a good one: the list of events sent to a
-model is not just a list — it satisfies **properties** that the provider's API requires, and
-those properties are stated as code rather than maintained by care.
+The list of events sent to a model is not just a list: it satisfies **properties** the
+provider's API requires, and stating those as code is what makes them hold. Maintained by
+care, they hold until the first refactor.
 
-They keep four (`ToolCallMatchingProperty`, `BatchAtomicityProperty`,
-`ObservationUniquenessProperty`, `ToolLoopAtomicityProperty`), each with two mechanisms:
-`enforce`, which removes offending events, and *manipulation indices*, which mark where the
-list may be cut without breaking the property. A condenser that respects those indices cannot
-produce an invalid payload.
+Each property carries two mechanisms: `enforce`, which removes offending events, and
+*manipulation indices*, which mark where the list may be cut without breaking the property. A
+condenser that respects those indices cannot produce an invalid payload.
 
 **Why this matters here specifically.** F-12 was this exact class of bug: `Message` had no way
 to carry an assistant turn's tool calls, so every `tool_result` referenced a `tool_use` that
@@ -84,9 +81,8 @@ def safe_cut_points(messages: Sequence[Message]) -> set[int]:
     F-12 failure — and a truncation that produces it would be much harder to attribute than
     the original, because the transcript was valid when it was built.
 
-    Returned as a set rather than a single "safe boundary" for the same reason OpenHands
-    returns indices: a condenser wants to choose *which* safe cut best fits its budget, not be
-    handed one.
+    Returned as a set rather than a single "safe boundary" because a condenser wants to choose
+    *which* safe cut best fits its budget, not be handed one.
     """
     safe: set[int] = set()
     for index in range(len(messages) + 1):

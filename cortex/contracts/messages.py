@@ -83,10 +83,10 @@ class InvestigationProgress(_Message):
 
     #: Position in this investigation's progress stream, starting at 1.
     #:
-    #: Added before anything consumed these, on a finding from indexing the OpenHands
-    #: frontend (ADR 0002, round two). Their conversation store dedups incoming events by id
-    #: and skips side-effects for ones it has already seen, with a comment citing their own
-    #: issue: *"a reconnect replays the backlog from a stale anchor"*.
+    #: Added before anything consumed these, from a survey of how streaming UIs handle
+    #: reconnects (ADR 0002). The pattern that keeps recurring is a store that
+    #: dedups incoming events by id and skips side-effects for ones it has already seen,
+    #: because a reconnect replays the backlog from a stale anchor.
     #:
     #: The original design here was for a terminal, which prints each line as it arrives and
     #: never reconnects. A UI is a different consumer: it drops out, comes back, and receives

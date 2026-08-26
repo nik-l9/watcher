@@ -5,9 +5,9 @@ judgement that it is finished — and everything downstream verifies *what the r
 rather than *whether it said enough*. A report can be perfectly grounded, survive the citation
 gate and the adversarial verifier, and answer less than was asked.
 
-Adapted from OpenHands' goal judge. The tests below are mostly about the two boundaries that
-keep an LLM's opinion from doing damage: it may only add a caveat, and a judge that cannot run
-must say so rather than imply a pass.
+The tests below are mostly about the two boundaries that keep an LLM's opinion from doing
+damage: it may only add a caveat, and a judge that cannot run must say so rather than imply a
+pass.
 """
 
 from __future__ import annotations

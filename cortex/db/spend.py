@@ -4,9 +4,8 @@ Usage was recorded per investigation and never aggregated, so there was no answe
 this tenant costing us" — the question every multi-tenant product is eventually asked, usually
 by someone deciding a price.
 
-Adapted in intent from OpenHands' `ConversationStats` / `MetricsSnapshot`, which track spend per
-conversation. Ours differs in one way that matters: their unit is a conversation and ours is a
-*tenant*, because ours is the thing that gets an invoice.
+The unit is the *tenant*, not the conversation. Per-conversation spend is the easier thing to
+record and the wrong thing to aggregate on: the tenant is what gets an invoice.
 
 **The reason this needed a migration first.** `investigations.tokens_used` was a single total,
 and a total cannot be priced. Input and output differ by 5x on every model we run, and a cache
