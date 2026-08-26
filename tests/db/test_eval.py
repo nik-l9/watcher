@@ -1743,10 +1743,11 @@ class TestAFixtureAnswersOnlyWhatItWasAsked:
 
     def test_a_different_event_returns_an_empty_series_not_another_one(self) -> None:
         scenario = by_name("partial_month_false_premise")
-        planted = scenario.responses["posthog__event_trend"]
-        decoy = scenario.response_for("posthog__event_trend", {"event": "signup_completed"})
+        planted = scenario.daily_truth["posthog__event_trend"].event
+        asked = {"event": "signup_completed", "interval": "day"}
+        decoy = scenario.response_for("posthog__event_trend", asked)
 
-        assert decoy != planted
+        assert decoy != scenario.response_for("posthog__event_trend", {**asked, "event": planted})
         assert decoy["series"] == []
         assert decoy["total"] == 0
         assert decoy["row_count"] == 0
@@ -1755,11 +1756,22 @@ class TestAFixtureAnswersOnlyWhatItWasAsked:
 
     def test_the_metadata_survives_so_the_empty_result_is_readable(self) -> None:
         """An empty payload that also lost its interval and range says "nothing here" about an
-        unknown question. The scalars are what make it a usable observation."""
+        unknown question. The scalars are what make it a usable observation.
+
+        The interval echoes the request rather than a granularity the fixture chose, and a
+        request naming none gets `posthog.event_trend`'s own default. A fixture answering at
+        some other default is standing in for a connector this project does not have -- which
+        is how the daily call ended up being served monthly buckets.
+        """
         scenario = by_name("partial_month_false_premise")
         decoy = scenario.response_for("posthog__event_trend", {"event": "checkout_started"})
-        assert decoy["interval"] == "month"
+        assert decoy["interval"] == "day"
         assert decoy["start_date"] and decoy["end_date"]
+
+        weekly = scenario.response_for(
+            "posthog__event_trend", {"event": "checkout_started", "interval": "week"}
+        )
+        assert weekly["interval"] == "week"
 
     def test_emptying_rather_than_erroring(self) -> None:
         """ "Nothing here" is a real observation and is what makes a decoy disprovable. An error
@@ -1820,3 +1832,102 @@ class TestAFixtureMustNotArgueAgainstItsOwnGroundTruth:
         assert "$pageview" in scenario.events_described()
         advertised = {e["name"] for e in scenario.response_for("posthog__list_events")["events"]}
         assert scenario.events_described() <= advertised
+
+
+class TestTheDiscriminatingCallMustBeAnswerable:
+    """`partial_month_false_premise` names the daily call as the one that separates a real fall
+    from a calendar artefact, and could not answer it.
+
+    Its trend payload was three monthly buckets. `posthog.event_trend` defaults `interval` to
+    `"day"`, so the fixture was both serving a granularity nobody asked for and standing in for
+    a connector that behaves differently. Run 26 asked for daily granularity three times, was
+    handed monthly buckets each time, never saw a run-rate, and hedged the premise to
+    "unverifiable" — while `required_capabilities` recorded the discriminating call as made.
+    """
+
+    SCENARIO = "partial_month_false_premise"
+
+    def test_a_daily_request_gets_daily_buckets(self) -> None:
+        scenario = by_name(self.SCENARIO)
+        payload = scenario.response_for(
+            "posthog__event_trend",
+            {
+                "event": "user signed up",
+                "interval": "day",
+                "start_date": "2026-07-01",
+                "end_date": "2026-08-26",
+            },
+        )
+        assert payload["interval"] == "day"
+        # 31 days of July and the 12 of August that exist. Not 57: the window is clamped to the
+        # data, which is the fact the analyst has to notice.
+        assert payload["row_count"] == 43
+        assert payload["end_date"] == "2026-08-12"
+
+    def test_the_run_rate_the_ground_truth_states_is_computable_from_it(self) -> None:
+        """156.4/day against 157.0/day is the answer. Both runs of the scenario instead divided
+        August's total by the 26 days the calendar had, having asked for a window ending on the
+        26th — so the number they reported was 72/day and the comparison was meaningless."""
+        scenario = by_name(self.SCENARIO)
+        payload = scenario.response_for(
+            "posthog__event_trend", {"event": "user signed up", "interval": "day"}
+        )
+        by_month: dict[str, list[int]] = {}
+        for row in payload["series"]:
+            by_month.setdefault(row["bucket"][:7], []).append(row["value"])
+        july = by_month["2026-07"]
+        august = by_month["2026-08"]
+        assert len(july) == 31
+        assert len(august) == 12
+        # Flat within noise, which is what "signups did not fall" means here.
+        assert abs(sum(august) / len(august) - sum(july) / len(july)) < 8
+
+    def test_the_monthly_trap_still_works(self) -> None:
+        """The scenario is only worth running if the naive call still looks like a collapse. One
+        full month against a third of one, with nothing in the payload calling it partial."""
+        scenario = by_name(self.SCENARIO)
+        payload = scenario.response_for(
+            "posthog__event_trend", {"event": "user signed up", "interval": "month"}
+        )
+        buckets = {row["bucket"][:7]: row["value"] for row in payload["series"]}
+        assert buckets["2026-08"] < buckets["2026-07"] / 2
+        assert "partial_buckets" not in payload
+
+    def test_both_stated_alternatives_can_establish_the_run_rate(self) -> None:
+        """`required_capabilities` offers `posthog__event_trend` or `ga4__get_sessions`, meaning
+        either establishes it. That was false while only GA4 carried daily rows: an analyst
+        picking the other alternative scored as having made the discriminating call while
+        holding nothing that could answer it."""
+        scenario = by_name(self.SCENARIO)
+        # Same window on both sides: PostHog plants June as well, GA4 starts in July.
+        trend = scenario.response_for(
+            "posthog__event_trend",
+            {"event": "user signed up", "interval": "day", "start_date": "2026-07-01"},
+        )
+        sessions = scenario.response_for("ga4__get_sessions", {})
+        assert len(trend["series"]) == 43
+        assert len({row["dimensions"]["date"] for row in sessions["rows"]}) == 43
+
+
+class TestEveryPlantedEventStaysAdvertised:
+    """The invariant every new planting field has broken in turn.
+
+    Moving this scenario's series into `daily_truth` emptied `events_described`, so discovery
+    stopped advertising `user signed up` and the analyst would have been told the event it
+    needed did not exist. Asserted across all scenarios rather than for the field that broke it
+    most recently, because the next field will break it the same way.
+    """
+
+    def test_described_events_are_advertised_everywhere(self) -> None:
+        for scenario in SCENARIOS:
+            advertised = {
+                e["name"] for e in scenario.response_for("posthog__list_events")["events"]
+            }
+            missing = scenario.events_described() - advertised
+            assert not missing, f"{scenario.name} describes unadvertised events: {sorted(missing)}"
+
+    def test_a_daily_truth_event_is_among_them(self) -> None:
+        scenario = by_name("partial_month_false_premise")
+        assert "user signed up" in scenario.events_described()
+        advertised = {e["name"] for e in scenario.response_for("posthog__list_events")["events"]}
+        assert "user signed up" in advertised
