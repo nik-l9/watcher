@@ -1,8 +1,8 @@
 """A cause needs two independent lines of evidence, or the report does not narrow to it.
 
 ADR 0005 decision 3, from DOE-NE-STD-1004-92 and found in none of the other seven frameworks
-surveyed. Its Events-and-Causal-Factor rule, as quoted in `docs/research/rca-frameworks.md`
-section 8.5: every cause node carries two independent lines of evidence, each named, and if only
+surveyed. Its Events-and-Causal-Factor rule: every cause node carries two independent lines
+of evidence, each named, and if only
 one is available **the tree does not narrow** -- "all possible causes should be evaluated as
 potential causes". Insufficient evidence does not license a pick; it licenses continued breadth.
 

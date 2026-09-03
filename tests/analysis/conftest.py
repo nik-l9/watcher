@@ -1,6 +1,6 @@
 """A replica of our own signup series, for tests that need a known answer.
 
-Rebuilt from the description in `docs/research/metric-attribution.md` section 3.6: 90 daily
+The replica the changepoint and conformal work was measured against: 90 daily
 points from 2026-05-06, means of 215 / 90 / 200 with breaks at index 42 (2026-06-17) and 70
 (2026-07-15), and a weekday multiplier large enough that a naive segmenter fits the weekend
 dips instead of the real shifts.

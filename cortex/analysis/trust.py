@@ -1,8 +1,7 @@
 """Is this series trustworthy enough to answer a business question from.
 
-ADR 0005 decision 1, and the ordered gate in `docs/research/data-trust-gate.md` section 6.1.
-Eleven checks are specified there; this implements the ones whose inputs already exist and
-reports the rest as unknown rather than as passing.
+ADR 0005 decision 1, which specifies an ordered gate of eleven checks. This implements the
+ones whose inputs already exist and reports the rest as unknown rather than as passing.
 
 **Why that distinction is the whole design.** The research's warning is blunt: *a gate whose
 checks all return `unknown` passes everything*. Sequenced wrongly it looks like a safeguard and

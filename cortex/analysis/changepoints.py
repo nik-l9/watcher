@@ -5,10 +5,9 @@ penalty, and a **minimum segment length**, which is the parameter that actually 
 this works.
 
 Why exact rather than PELT or binary segmentation: at n=90 the pure-Python O(n^2) inner loop
-runs in about 2 ms, so approximation buys nothing. Measured in
-`docs/research/metric-attribution.md` section 3.6, which also tested the alternatives and
-rejected them -- CUSUM fires on weekly seasonality, and Prophet cannot represent a level shift
-at all.
+runs in about 2 ms, so approximation buys nothing. Measured here on a replica of this
+project's own signup series, which also ruled out the alternatives: CUSUM fires on weekly
+seasonality, and Prophet cannot represent a level shift at all.
 
 **The minimum segment length is the whole ballgame, and the numbers are stark.** Against a
 replica of our own series with a realistic weekday cycle, scoring exact recovery of two known

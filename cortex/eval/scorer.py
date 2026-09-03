@@ -53,7 +53,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.agents.investigator import Investigation
-from cortex.agents.timing import GATE, SUFFICIENCY, VERIFY
+from cortex.agents.timing import DRAFT, GATE, SUFFICIENCY, VERIFY
 from cortex.db.models import Evidence, ToolCall
 from cortex.db.threads import citable_investigation_ids
 from cortex.eval.fixtures import (
@@ -71,6 +71,11 @@ from cortex.reports.schema import (
 )
 from cortex.reports.shape import Shape, shape_for
 from cortex.reports.sufficiency import AppliedSufficiency
+
+# Aliased because `Verdict` above is the *hypothesis* verdict from the report schema, and this
+# is the per-claim one. Same spelling, different enum: comparing a claim against the wrong one
+# never matches, which would leave the dimension below reporting a clean 1.00 forever.
+from cortex.reports.verifier import Verdict as ClaimVerdictKind
 from cortex.reports.verifier import VerificationResult, causal_claims, causal_hypotheses
 from cortex.tenancy.context import TenantContext
 from cortex.tools.executor import canonical_hash
@@ -343,11 +348,13 @@ class Scorer:
             await self._tool_selection(session, tenant, investigation_id, scenario),
             self._completeness(scenario, report),
             self._actionability(scenario, report),
-            self._draft_reliability(report, gate_result, verification),
+            self._draft_reliability(report, gate_result, verification, investigation),
             self._latency(investigation),
         ]
         if sufficiency is not None:
             card.dimensions.append(self._veto_precision(scenario, sufficiency))
+        if verification is not None:
+            card.dimensions.append(self._verifier_precision(scenario, verification))
         if scenario.ground_truth.is_false_premise:
             # Only meaningful where there is a premise to refute, so it is appended rather than
             # scored as 1.0 everywhere else -- a dimension that is perfect by default on three
@@ -364,12 +371,25 @@ class Scorer:
         report: InvestigationReport,
         gate_result: GateResult,
         verification: VerificationResult | None,
+        investigation: Investigation | None = None,
     ) -> Dimension:
         """How much of the first draft survived review.
 
         Non-gating, because a removed claim is the system working. Scored anyway,
         because the alternative is that the drafter degrades invisibly for as long as
         the defenses keep holding — and the day one of them misjudges, the claim ships.
+
+        **The detail names which mechanism removed what, and how many drafts it took.** The
+        score cannot: two mechanisms remove claims for unrelated reasons, and one number over
+        both says a draft got worse without saying how. A citation that resolves to nothing is
+        the drafter inventing an id; a claim its own evidence does not support is the drafter
+        overreaching from real data. Those have different fixes, and 0.82 looks identical either
+        way. Same argument the sufficiency gate's rejections are already kept separate under.
+
+        The draft attempt count is here for the reason a large deployment of this pattern gives
+        for watching its pre-revision pass rate separately (arXiv 2608.18300 §6.1): a drafter
+        needing three tries to emit a parseable report and a reviewer becoming stricter both land
+        on this dimension, and only the attempt count separates them.
         """
         surviving = _claim_count(report)
         caught = gate_result.hallucination_count + (
@@ -388,7 +408,9 @@ class Scorer:
         return Dimension(
             "draft_reliability",
             score,
-            f"{surviving}/{drafted} drafted claims survived review",
+            f"{surviving}/{drafted} drafted claims survived review"
+            + _removal_breakdown(gate_result, verification)
+            + _draft_attempts(investigation),
             gates=True,
             threshold=_DRAFT_RELIABILITY_FLOOR,
         )
@@ -869,6 +891,66 @@ class Scorer:
             ),
         )
 
+    def _verifier_precision(
+        self, scenario: Scenario, verification: VerificationResult
+    ) -> Dimension:
+        """Did the adversarial verifier remove the answer it was supposed to check?
+
+        **The gap this closes.** `veto_precision` asks that question of the sufficiency gate, and
+        it exists because that gate was found withholding correct planted causes while every other
+        dimension read clean. The verifier is the other mechanism that removes claims, it decides
+        by asking a model rather than by resolving an id, and nothing asked the same question of
+        it. So the more fallible of the two was the unwatched one.
+
+        Prompted by arXiv 2608.18300 §5.3, which measures this directly: a judge reaching a
+        *defensible verdict for the wrong reason* is a distinct error class, and it is invisible
+        unless something scores the judge's removals against a known answer. Here that answer is
+        the scenario's planted cause, which is ground truth rather than an opinion — so this stays
+        a mechanical check on an LLM's decision, and never an LLM's opinion about one.
+
+        **Why the citation gate is not scored this way.** Its reasons are typed and computed: a
+        claim it removes cited an id that does not resolve, which makes removal correct however
+        important the claim looked. Only a judgement call needs watching for confident mistakes.
+
+        Never gates, for `veto_precision`'s reason: a wrongly removed claim degrades an answer
+        rather than fabricating one, and gating is reserved for the second kind.
+        """
+        truth = scenario.ground_truth
+        if truth.declines_a_cause or not truth.required_signals:
+            return Dimension(
+                name="verifier_precision",
+                score=1.0,
+                detail="no findable cause to protect; a removal here is the verifier working",
+            )
+        removed = [
+            v.claim_text.lower()
+            for v in verification.verdicts
+            if v.verdict is ClaimVerdictKind.UNSUPPORTED
+        ]
+        if not removed:
+            return Dimension(
+                name="verifier_precision", score=1.0, detail="the verifier removed nothing"
+            )
+        protected = [
+            describe_requirement(requirement)
+            for requirement in truth.required_signals
+            if any(alt.lower() in text for text in removed for alt in alternatives_of(requirement))
+        ]
+        if not protected:
+            return Dimension(
+                name="verifier_precision",
+                score=1.0,
+                detail=f"{len(removed)} claim(s) removed, none carrying the planted cause",
+            )
+        return Dimension(
+            name="verifier_precision",
+            score=round(1.0 - len(protected) / len(truth.required_signals), 4),
+            detail=(
+                f"the verifier removed the planted cause: {', '.join(protected)} appeared in a "
+                "claim it judged unsupported"
+            ),
+        )
+
     def _latency(self, investigation: Investigation) -> Dimension:
         """Linear against the 90-second budget, floored at zero. Never gates.
 
@@ -902,6 +984,37 @@ class Scorer:
                 + (f" ({investigation.duration_ms}ms of it in the loop)" if loop_only else "")
             ),
         )
+
+
+def _removal_breakdown(gate_result: GateResult, verification: VerificationResult | None) -> str:
+    """Which mechanism removed which claims, named only when something was removed.
+
+    Silent on a clean draft: a detail line reading "gate 0, verifier 0" on every passing run
+    trains a reader to skip the field, and the field exists to be read on the run where it is
+    not zero.
+    """
+    gate = gate_result.hallucination_count
+    unsupported = verification.unsupported_count if verification else 0
+    parts = []
+    if gate:
+        parts.append(f"{gate} cited nothing that resolves")
+    if unsupported:
+        parts.append(f"{unsupported} unsupported by its own evidence")
+    if not parts:
+        return ""
+    return " (" + "; ".join(parts) + ")"
+
+
+def _draft_attempts(investigation: Investigation | None) -> str:
+    """How many drafting calls it took, named only when it took more than one.
+
+    A repair or a brevity retry is recoverable and deliberately not an error, so it leaves no
+    mark on any score. That is right, and it also means a drafter that has started needing two
+    attempts every run looks exactly like one that does not.
+    """
+    phases = getattr(getattr(investigation, "timings", None), "phases", None)
+    calls = getattr(phases.get(DRAFT), "calls", 0) if phases else 0
+    return f", after {calls} drafting attempts" if calls > 1 else ""
 
 
 def _wall_clock_ms(investigation: Investigation) -> int:

@@ -1,8 +1,8 @@
 """Whether a causal claim is available at all, decided before one is attempted.
 
-Eight predicates, G0 to G7, from `docs/research/metric-attribution.md` section 5.5. Two of them
-(G2a, G4) run on **shapes alone**, with no data values, which makes them the cheapest and
-sharpest checks we have.
+Eight predicates, G0 to G7, derived from the assumptions a single-unit attribution actually
+rests on. Two of them (G2a, G4) run on **shapes alone**, with no data values, which makes them the
+cheapest and sharpest checks we have.
 
 **The composition rule is worst-domain, following ROBINS-I: any single refusal refuses the whole
 causal claim. Confidence does not average.** A gate that averaged would let six easy passes

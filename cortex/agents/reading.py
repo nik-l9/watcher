@@ -6,11 +6,11 @@ the answer -- thirteen server-side event types whose `last_seen_at` all fell ins
 72-minute window on 2026-08-04, while browser autocapture kept flowing -- and was never read.
 The analyst then explained the signup cessation with a pageview collapse that began seven days
 later. The measured base rate for this class of failure is 13-25% for frontier models when the
-answer *is* in context (`docs/research/llm-rca.md` §4.1, ICLR 2025 Table 4a), so it is not a
+answer *is* in context (ICLR 2025, Table 4a), so it is not a
 prompt-quality problem to be argued away.
 
-**The mechanism is RCAgent's OBSK** (CIKM 2024, §3 of arXiv:2310.16340; our notes in
-`llm-rca.md` §3.1): show the controller only the head of an observation, keep the full thing
+**The mechanism is RCAgent's OBSK** (CIKM 2024, §3 of arXiv:2310.16340): show the controller
+only the head of an observation, keep the full thing
 in a key-value store behind a hash id, and make analysing it a separate deliberate act. Their
 ablation puts OBSK at G-Correctness 4.53 -> 5.22 and Invalid Rate 18.34 -> 7.93. Roy et al.
 (FSE 2024, §2.3) supply the complementary negative: their retrieval tool "is stateless, and
@@ -93,8 +93,8 @@ BULK_ROWS = 24
 #: Full observations returned per turn, however many the model asks for.
 #:
 #: A turn that asks for eight full payloads is not a deliberate read; it is the pile of
-#: context that licensed the confident wrong answer in the first place (llm-rca.md §4.1: "the
-#: pile itself licensed an answer"). Three matches the middle of the tool-call width schedule.
+#: context that licensed the confident wrong answer in the first place -- the pile itself is
+#: what licensed it. Three matches the middle of the tool-call width schedule.
 #: Extra reads come back as a correctable error naming what was skipped, so nothing is lost --
 #: the model asks again next turn.
 MAX_READS_PER_STEP = 3
