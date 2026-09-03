@@ -179,8 +179,8 @@ class Ambiguity(enum.StrEnum):
 def ambiguities(question: str) -> tuple[Ambiguity, ...]:
     """Structural gaps in the question, decided in code.
 
-    **Deliberately only what a predicate can settle.** `docs/research/clarifying-questions.md`
-    is unambiguous that a model cannot estimate its own need to clarify -- six independent
+    **Deliberately only what a predicate can settle.** The literature is unambiguous that a
+    model cannot estimate its own need to clarify -- six independent
     measurements, including a clarification-need F1 of 0.33-0.37 and one benchmark whose R-squared
     is *negative*, worse than a constant. So this returns facts about the sentence, never a sense
     that it is vague.

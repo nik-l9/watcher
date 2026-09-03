@@ -1,7 +1,7 @@
 """The only significance statement available to us, and the trap in using it.
 
-Reproduces the numbers `docs/research/metric-attribution.md` section 5.2 verified against the
-same replica: the 2026-06-17 break reaches `p = 0.0143`, at the floor for a 70-day window,
+Reproduces the numbers verified against the same replica: the 2026-06-17 break reaches
+`p = 0.0143`, at the floor for a 70-day window,
 while in-time placebos are nowhere near rejecting.
 """
 

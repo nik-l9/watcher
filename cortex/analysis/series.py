@@ -20,8 +20,8 @@ the one every convenience API makes for you: it manufactures evidence of an even
 went to zero!") out of the absence of evidence, and it corrupts the noise estimate that every
 downstream test depends on.
 
-Provenance: `docs/research/metric-attribution.md` section 3.7, which demonstrated each of
-these on a replica of our own series.
+Each of these was demonstrated on a replica of this project's own series before being
+encoded here, rather than adopted on the strength of the argument for it.
 """
 
 from __future__ import annotations
