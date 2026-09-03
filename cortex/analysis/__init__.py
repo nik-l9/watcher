@@ -8,8 +8,8 @@ Three modules, in the order they run and the order ADR 0005 derives them:
 - `conformal` says whether that movement is distinguishable from noise -- the only
   significance statement available to us, given that we have no control series.
 
-**Stdlib only, deliberately.** `docs/research/metric-attribution.md` measured exact optimal
-partitioning with a pure-Python inner loop at 2.2 ms for n=90 and 41 ms for a year, so numpy
+**Stdlib only, deliberately.** Exact optimal partitioning with a pure-Python inner loop was
+measured at 2.2 ms for n=90 and 41 ms for a year, so numpy
 buys nothing here and would add a declared dependency to a project that currently gets it
 only transitively through matplotlib.
 
