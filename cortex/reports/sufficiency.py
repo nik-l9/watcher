@@ -141,6 +141,27 @@ SUFFICIENCY_SCHEMA: dict[str, Any] = {
     "properties": {
         # Asked first, so the judgement is made before there is a list on the page to
         # rationalise. The fields of a structured output are generated in order.
+        #
+        # **This order is deliberately the opposite of the verifier's, and the difference is
+        # the direction each one can fail.** `VERDICT_SCHEMA` emits its reason before its
+        # verdict, because a verifier that decides first writes a justification for what it
+        # already said. Here the risk runs the other way: naming what is missing is easy and
+        # always possible -- more evidence can always be wished for -- so a `missing`-first
+        # order would leave the model a list it must then agree with, and the agreeing answer
+        # is "insufficient". That is over-abstention, and a gate that refuses everything
+        # scores perfectly on a suite whose hard bar is a hallucination count of zero.
+        #
+        # arXiv 2605.23970 recommends grounding before scoring and reports revision
+        # susceptibility falling from 75-85% to 5-22%, which argues for flipping this. It is
+        # not flipped, because that paper measures a *judge of quality* and this is a judge of
+        # *sufficiency*, where the cheap answer is refusal rather than approval. Its §8 warning
+        # -- that a rigid format with no room to reason destroys the gate entirely -- does not
+        # apply: `reason` exists and is required.
+        #
+        # The deciding evidence does not exist yet. It is a paired should-answer /
+        # should-decline scenario set, where flipping this order would show up as the decline
+        # twins improving while their answerable parents got worse. Until that exists, changing
+        # this trades a measured concern for an unmeasured one.
         "sufficient": {
             "type": "boolean",
             "description": (
