@@ -19,8 +19,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from cortex.agents.anthropic_llm import DEFAULT_EFFORT, DEFAULT_MODEL, AnthropicLLM
+from cortex.agents.anthropic_llm import DEFAULT_EFFORT, DEFAULT_MODEL
 from cortex.agents.llm import LLM
+from cortex.agents.provider import build_llm
 from cortex.eval.fixtures import SCENARIOS, by_name
 from cortex.eval.replay import FAILURES_DIRNAME
 from cortex.eval.runner import EvalHarness
@@ -155,7 +156,7 @@ def _provider(args: argparse.Namespace) -> LLM:
         # which is the correct outcome for "no analyst was available" and proves the
         # error path rather than fabricating a passing score.
         return RecordedLLM()
-    return AnthropicLLM(model=args.model, effort=args.effort)
+    return build_llm(model=args.model, effort=args.effort)
 
 
 def _investigator_factory(args: argparse.Namespace) -> Any:

@@ -592,3 +592,92 @@ class TestGateEdgePaths:
         )
         assert len(result.report.data_quality) == 1
         assert result.report.data_quality[0].evidence_ids == [good.id]
+
+
+class TestEveryFieldIsPrunedNotJustFiltered:
+    """A recommendation kept its rejected citation, and a recommendation is what a reader acts on.
+
+    Five fields prune their evidence ids against the surviving set — claims, hypotheses, risks,
+    data-quality notes, and charts by exclusion. `recommendations` only asked `_survives`, which
+    answers "keep or drop" and leaves the citations untouched. So a recommendation citing one
+    real id and one invented one was kept *carrying the invented one*.
+
+    Observed rather than reasoned about: in one run `grounding` reported 1 of 14 citations
+    unresolvable and named an id sitting in `recommendations[2].evidence_ids[0]` — an id this
+    gate had already rejected, written a rejection for, and then shipped.
+    """
+
+    async def test_a_recommendation_loses_its_rejected_citation(
+        self, session: AsyncSession
+    ) -> None:
+        ctx = await _tenant(session, slug="rec-prune")
+        investigation_id = await _investigation(session, ctx)
+        evidence = await _evidence(session, ctx, investigation_id)
+        invented = uuid.uuid4()
+
+        report = _report(
+            [Claim(text="Signups fell 18%.", evidence_ids=[evidence.id])],
+            recommendations=[
+                Recommendation(
+                    action="Restore the GA4 measurement tag.",
+                    rationale="Collection stopped on 3 August while pageviews held.",
+                    evidence_ids=[evidence.id, invented],
+                )
+            ],
+        )
+        result = await GroundingGate().apply(
+            session, ctx, investigation_id=investigation_id, report=report
+        )
+
+        kept = result.report.recommendations[0]
+        # Kept, because one citation resolved. Cleaned, which is the part that was missing.
+        assert kept.evidence_ids == [evidence.id]
+        assert invented not in result.report.cited_evidence_ids()
+
+    async def test_a_clean_report_still_passes_the_post_condition(
+        self, session: AsyncSession
+    ) -> None:
+        """The gate now checks its own promise before returning, so this asserts the check is
+        not simply always-fail — every citation in a grounded report resolves."""
+        ctx = await _tenant(session, slug="postcond")
+        investigation_id = await _investigation(session, ctx)
+        evidence = await _evidence(session, ctx, investigation_id)
+
+        report = _report(
+            [Claim(text="Signups fell 18%.", evidence_ids=[evidence.id])],
+            recommendations=[
+                Recommendation(
+                    action="Roll it back.",
+                    rationale="The modal change lines up with the mobile drop.",
+                    evidence_ids=[evidence.id],
+                ),
+            ],
+            risks=[Risk(description="Sample is small.", evidence_ids=[evidence.id])],
+        )
+        result = await GroundingGate().apply(
+            session, ctx, investigation_id=investigation_id, report=report
+        )
+        assert result.report.cited_evidence_ids() == {evidence.id}
+
+    async def test_the_post_condition_names_the_gate_when_it_leaks(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The class-level fix. A field added later that filters without pruning fails here,
+        loudly, rather than as an unresolvable citation in something already handed to a reader.
+
+        Simulated by making one field skip its pruning, which is exactly the defect that
+        shipped — the message has to say the gate is at fault, not the report.
+        """
+        ctx = await _tenant(session, slug="leaky")
+        investigation_id = await _investigation(session, ctx)
+        evidence = await _evidence(session, ctx, investigation_id)
+        invented = uuid.uuid4()
+
+        gate = GroundingGate()
+        report = _report(
+            [Claim(text="Signups fell 18%.", evidence_ids=[evidence.id])],
+            risks=[Risk(description="Small sample.", evidence_ids=[evidence.id, invented])],
+        )
+        monkeypatch.setattr(gate, "_filter_risks", lambda risks, valid, rejections: list(risks))
+        with pytest.raises(ReportRejected, match="did not strip every unresolvable citation"):
+            await gate.apply(session, ctx, investigation_id=investigation_id, report=report)

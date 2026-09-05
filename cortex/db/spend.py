@@ -43,6 +43,13 @@ RATES: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-fable-5": (10.00, 50.00),
+    # **Unverified, and deliberately set to the conservative maximum.** These are here so a
+    # permitted model is never billed at zero, not because these are the published rates -- I
+    # do not have those. The direction of the error is the point: `_FALLBACK` exists because a
+    # spend report that overstates is one somebody checks, while one that understates is one
+    # somebody trusts. Replace both with the published figures before this prices anything real.
+    "gpt-5.2": (10.00, 50.00),
+    "gpt-5.2-mini": (10.00, 50.00),
 }
 
 #: The most expensive thing we know of. Used when a model is unrecognised or absent.

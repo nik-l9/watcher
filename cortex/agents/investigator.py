@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from cortex.agents.employee import Employee
 from cortex.agents.llm import (
     LLM,
+    LLMAuthenticationFailed,
     LLMError,
     LLMOutputTruncated,
     Message,
@@ -62,7 +63,7 @@ from cortex.agents.transcript import assert_valid
 from cortex.db.models import Evidence
 from cortex.db.threads import citable_investigation_ids, prior_context
 from cortex.memory.recall import HybridRecall
-from cortex.reports.schema import InvestigationReport, llm_report_schema
+from cortex.reports.schema import InvestigationReport, PremiseVerdict, llm_report_schema
 from cortex.reports.shape import AMBIGUITY_GUIDANCE, GUIDANCE, ambiguities, shape_for
 from cortex.tenancy.context import TenantContext
 from cortex.tools.base import ToolError, ToolRegistry
@@ -676,6 +677,12 @@ class Investigator:
                         tools=self._tool_specs(ledger),
                         max_tokens=8192,
                     )
+            except LLMAuthenticationFailed as exc:
+                # Stopped regardless of what was gathered. Reporting on partial evidence is the
+                # right move for a transient failure and pointless for a rejected credential:
+                # the drafting call uses the same credential, so the run ends either way -- and
+                # it ends naming drafting rather than the key, which is the wrong place to look.
+                raise InvestigationFailed(f"the analyst could not authenticate: {exc}") from exc
             except LLMError as exc:
                 if not evidence_ids:
                     # Nothing gathered and the model is unavailable: there is no
@@ -1035,8 +1042,34 @@ def _is_degenerate(report: InvestigationReport, evidence_ids: list[uuid.UUID]) -
     Gated on evidence rather than on turns: an investigation that gathered nothing has nothing
     to write a finding from, and failing it for that would report the wrong problem -- the
     absence of evidence, which the loop already reports.
+
+    **The exemption, added after this test rejected a correct report twice.** The paragraph above
+    assumed no real report has zero of both, on thirteen drafts. Run 30 produced the
+    counter-example on `partial_month_false_premise`: a question whose answer is "nothing
+    happened" has no cause to hypothesise about *and* may carry its whole answer in the premise
+    check and the summary -- which is what `GUIDANCE[Shape.FACTUAL]` asks for. The draft was
+    refused twice and the investigation was discarded.
+
+    So zero-of-both is no longer sufficient. A report that recorded a premise verdict and wrote
+    the check behind it has done work a collapsed draft does not: both fields default to "nothing
+    was decided" (`NONE_ASSERTED` and `""`), and the placeholder drafts left them there. That is
+    a structural difference rather than a length threshold, which is what this test wanted in the
+    first place.
     """
-    return bool(evidence_ids) and not report.findings and not report.hypotheses
+    if not evidence_ids or report.findings or report.hypotheses:
+        return False
+    return not _answers_by_premise(report)
+
+
+def _answers_by_premise(report: InvestigationReport) -> bool:
+    """Whether the report's answer *is* its premise verdict.
+
+    True for a refutation of a false premise, which needs no findings and no hypotheses to be
+    complete. False for a stub, which never reaches either field.
+    """
+    return report.premise is not PremiseVerdict.NONE_ASSERTED and bool(
+        report.premise_checked.strip()
+    )
 
 
 def _opening(
@@ -1326,6 +1359,25 @@ def _drafting_instruction(
         "Every claim must carry the ids of the observations that establish it. A "
         "claim citing anything not on this list will be removed before the report "
         "is shown, and the finding will be lost with it.\n\n"
+        # The compound-claim rule, added because losing these sentences costs the *answer*.
+        # A sentence relating two observations is checked against exactly the ids it carries,
+        # and the drafter kept citing only the one the sentence appears to be about: "the
+        # campaign ended on 14 June, one day before the drop began" citing the Slack message
+        # alone. The verifier removes it correctly -- when the drop began is not in that
+        # message -- and the summary is left describing a 68.4% collapse in paid search with
+        # nothing about the exhausted budget behind it. The reader gets the mechanism and not
+        # the thing to act on, while `accuracy` still reads 1.00 because the cause survives in
+        # a finding. Measured twice on `campaign_traffic_drop` in run 32.
+        "**A claim that relates two observations must cite both.** Each claim is checked "
+        "against only the ids it carries, by a reader who cannot see the rest of the "
+        "report. So a sentence saying one thing happened before, after, during or because "
+        "of another needs the id for each side of that relationship, and a sentence "
+        "comparing two figures needs the id behind each figure. Citing only the "
+        "observation the sentence is *about* is the common mistake: 'the campaign ended on "
+        "the 14th, the day before the drop began' needs the record of the campaign ending "
+        "*and* the series that shows when the drop began. If you cannot cite both, state "
+        "only the half you can establish, in its own sentence — a narrower claim that "
+        "survives is worth more than a fuller one that is removed.\n\n"
         "Write the evidence ids in the evidence_ids field only — never inside the "
         "claim text.\n\n"
         # These are Pydantic validators, so they cannot be expressed in the JSON Schema

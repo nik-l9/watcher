@@ -69,6 +69,7 @@ import asyncio
 import datetime
 import enum
 import json
+import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -77,7 +78,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cortex.agents.llm import LLM, LLMError, Message, Usage
+from cortex.agents.llm import LLM, LLMAuthenticationFailed, LLMError, Message, Usage
 from cortex.db.models import Evidence
 from cortex.db.threads import citable_investigation_ids
 from cortex.reports.gate import Rejection, RejectionReason
@@ -186,11 +187,36 @@ _DECLINES_A_CAUSE = (
     "could not identify",
     "rules out",
     "ruled out",
+    # The gerund was missing while the other two were present, and it is the form a report
+    # actually uses: "limited to a CI runner pin and a dependency bump, ruling out a
+    # deploy-caused funnel regression". The sufficiency gate withheld that sentence -- an
+    # elimination, backed by the diff it names -- as though it asserted the cause it rules out.
+    "ruling out",
+    "rule out",
     "is not the cause",
     "not the cause",
     "no cause",
     "not because",
     "unrelated to",
+    "does not explain",
+    "do not explain",
+    "cannot explain",
+    "did not cause",
+    "does not cause",
+    "not caused by",
+)
+
+
+#: A negated subject before a causal marker: "no code change explains a session change",
+#: "nothing in the diff caused it".
+#:
+#: A phrase list cannot catch this -- the noun between the negation and the verb is arbitrary --
+#: so it is the one pattern here expressed as a regex. Kept narrow deliberately: the negation has
+#: to be within a few words of the marker, because a sentence that says "no" early and asserts a
+#: cause later is an assertion, and widening the window would start excusing those.
+_NEGATED_CAUSE = re.compile(
+    r"\b(?:no|nothing|neither|none)\b[^.;]{0,40}?"
+    r"\b(?:explains?|explained|caused?|causes|drove|drives|triggered|triggers|led to)\b"
 )
 
 
@@ -226,7 +252,18 @@ def is_causal_claim(text: str) -> bool:
         return False
     if any(idiom in lowered for idiom in _DESCRIPTIVE_IDIOMS):
         return False
-    return any(marker in lowered for marker in _CAUSAL_MARKERS)
+    # Eliminations are excised, not short-circuited on, and the difference matters. Ruling a
+    # candidate out *is* the analysis -- it is what Kepner-Tregoe's IS/IS-NOT step produces and
+    # what makes a remaining cause worth believing -- so a gate that removes eliminations
+    # deletes the reasoning and keeps the conclusion, which is the opposite of its purpose.
+    #
+    # But returning False on any sentence *containing* an elimination would blind the gate to
+    # "no single deploy explains it, but the campaign ending caused the fall", which asserts a
+    # cause in its second clause. So each elimination is cut out and the question is asked of
+    # what remains. The first version short-circuited and let that sentence through, which is
+    # the dangerous direction for a gate whose job is catching unsupported assertions.
+    remainder = _NEGATED_CAUSE.sub(" ", lowered)
+    return any(marker in remainder for marker in _CAUSAL_MARKERS)
 
 
 def causal_claims(report: InvestigationReport) -> list[tuple[str, Claim]]:
@@ -774,6 +811,43 @@ class AdversarialVerifier:
             session, tenant, investigation_id=investigation_id, report=report
         )
 
+    async def _judge_call(self, rendered: str) -> tuple[dict[str, Any], Usage]:
+        """One verdict, retried once on a transient failure.
+
+        **Why a retry belongs here specifically.** A claim this call cannot judge ships to the
+        reader unchecked and counts as a delivered hallucination, which fails the run. Run 30
+        lost three claims on one attempt to three consecutive `APITimeoutError` -- no logic
+        defect, just a slow minute at the provider, and the suite correctly reported three
+        delivered hallucinations for it. Giving up after one attempt makes a transient blip
+        indistinguishable from an unverifiable claim, and the two deserve different outcomes.
+
+        One retry, not a policy. The cost is bounded and paid only on failure, and it is worth
+        paying against a dimension that must read zero: a second full deadline on a rare timeout
+        is cheaper than a build that fails for a reason nobody can act on.
+
+        An authentication failure is never retried -- the credential will reject the next call
+        too, and spending another deadline to learn that is waste.
+        """
+        last: LLMError | None = None
+        for attempt in range(2):
+            try:
+                return await self._llm.structured(
+                    system=SYSTEM_PROMPT,
+                    messages=[Message(role="user", content=rendered)],
+                    schema=VERDICT_SCHEMA,
+                    max_tokens=1024,
+                )
+            except LLMAuthenticationFailed:
+                raise
+            except LLMError as exc:
+                last = exc
+                if attempt == 0:
+                    # Short and fixed. With one retry there is no herd to spread out, and the
+                    # delay has to stay small against a deadline the caller already waited on.
+                    await asyncio.sleep(1.0)
+        assert last is not None  # the loop either returns or records an error
+        raise last
+
     async def _judge(
         self, claim: Claim, location: str, evidence: dict[uuid.UUID, Evidence]
     ) -> tuple[ClaimVerdict, Usage, bool]:
@@ -793,12 +867,7 @@ class AdversarialVerifier:
             )
 
         try:
-            payload, usage = await self._llm.structured(
-                system=SYSTEM_PROMPT,
-                messages=[Message(role="user", content=rendered)],
-                schema=VERDICT_SCHEMA,
-                max_tokens=1024,
-            )
+            payload, usage = await self._judge_call(rendered)
         except LLMError as exc:
             return (
                 ClaimVerdict(

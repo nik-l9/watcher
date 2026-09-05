@@ -66,7 +66,7 @@ class TestRemovingThePlantedCauseIsPenalised:
             scenario, _verified(f"The {signal} ending is what drove the fall.")
         )
         assert scored.score < 1.0
-        assert "removed the planted cause" in scored.detail
+        assert "the summary lost the planted cause" in scored.detail
 
     def test_the_check_can_fail_at_all(self) -> None:
         """Guarding the mistake this nearly shipped with. `Verdict` names two different enums in
@@ -183,3 +183,56 @@ class TestTheRemovalBreakdownNamesTheMechanism:
             report, GateResult(report=report), _verified(), _WithTwoDrafts()
         )
         assert "after 2 drafting attempts" in scored.detail
+
+
+class TestItScoresWhatTheSummaryLostNotWhatWasRemoved:
+    """Two things can be true at once, and matching on the removed text alone conflated them.
+
+    Run 32: the verifier cut four sentences on `campaign_traffic_drop`, every one genuinely
+    unsupported by its own citation — "one day before the session drop began" citing only the
+    Slack message, "across three separate search queries" then listing four, "in the June 1–30
+    window" when the payload queried the 13th to the 16th. Correct removals, all of them.
+
+    And the delivered summary was left describing a 68.4% collapse in paid search without naming
+    the exhausted campaign budget that caused it: the reader gets the mechanism and not the
+    thing to act on. `accuracy` reads 1.00 throughout, because it searches the whole report and
+    the cause survives in a finding.
+
+    So the question is not whether a removal touched the cause. It is whether the summary still
+    carries it.
+    """
+
+    def test_a_correct_removal_that_keeps_the_cause_in_the_summary_is_clean(self) -> None:
+        scenario = by_name("campaign_traffic_drop")
+        signal = _cause_signal("campaign_traffic_drop")
+        verification = _verified(f"The {signal} ending drove the fall, one day before it began.")
+        verification.report.executive_summary[0] = Claim(
+            text=f"Signups fell because the {signal} budget was exhausted on 14 June.",
+            evidence_ids=[uuid.uuid4()],
+        )
+        scored = Scorer()._verifier_precision(scenario, verification)
+        assert scored.score == 1.0
+        assert "still names the planted cause" in scored.detail
+
+    def test_the_same_removal_scores_zero_when_the_summary_loses_it(self) -> None:
+        """The run-32 shape exactly: the removal is right and the answer is poorer for it."""
+        scenario = by_name("campaign_traffic_drop")
+        signal = _cause_signal("campaign_traffic_drop")
+        verification = _verified(f"The {signal} ending drove the fall, one day before it began.")
+        verification.report.executive_summary[0] = Claim(
+            text="Paid search session volume collapsed 68.4% in the second half of June.",
+            evidence_ids=[uuid.uuid4()],
+        )
+        scored = Scorer()._verifier_precision(scenario, verification)
+        assert scored.score == 0.0
+        assert "appears nowhere in the delivered summary" in scored.detail
+
+    def test_an_untouched_cause_reports_differently_from_a_surviving_one(self) -> None:
+        """Two clean outcomes that call for different attention: nothing bearing the cause was
+        touched, or something was and the summary held. One message for both would hide which."""
+        scenario = by_name("campaign_traffic_drop")
+        scored = Scorer()._verifier_precision(
+            scenario, _verified("Tuesday's traffic was slightly below Monday's.")
+        )
+        assert scored.score == 1.0
+        assert "none carrying the planted cause" in scored.detail

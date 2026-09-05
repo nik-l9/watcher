@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from cortex.agents.anthropic_llm import AnthropicLLM
 from cortex.agents.investigator import InvestigationCancelled, InvestigationFailed
 from cortex.agents.progress import QueueProgress
+from cortex.agents.provider import build_llm
 from cortex.agents.service import InvestigationService
 from cortex.contracts.messages import RunInvestigation
 from cortex.memory.recall import HybridRecall
@@ -61,7 +61,7 @@ def run_investigation(self: Any, payload: dict) -> dict:  # noqa: ANN401 - Celer
             # that back it. Recall failing is non-fatal inside the loop, so a tenant with
             # nothing ingested investigates exactly as before.
             service = InvestigationService(
-                llm=AnthropicLLM(),
+                llm=build_llm(),
                 recall=HybridRecall(resources.vectors, resources.graph),
                 # Enables the per-step cancellation check, which needs its own session to see
                 # a commit the gateway made after the loop's transaction began.
