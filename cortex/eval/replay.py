@@ -187,7 +187,7 @@ async def write_bundle(
         report=json.loads(delivered.model_dump_json()),
         duration_ms=int(getattr(investigation, "duration_ms", 0) or 0),
         tokens=int(getattr(getattr(investigation, "usage", None), "total", 0) or 0),
-        steps_used=int(getattr(investigation, "steps_used", 0) or 0),
+        steps_used=_steps_used(investigation),
         phases=_phase_json(getattr(investigation, "timings", None)),
         evidence=[_evidence_json(row) for row in evidence_rows],
         tool_calls=[_call_json(row) for row in call_rows],
@@ -209,6 +209,20 @@ async def write_bundle(
     path = directory / f"{scenario}-attempt{attempt}.json"
     path.write_text(bundle.to_json())
     return path
+
+
+def _steps_used(investigation: Any) -> int:
+    """How many steps the loop took.
+
+    Two shapes reach this. A live `Investigation` carries `steps`, a list; a replayed view
+    carries `steps_used`, the integer this function produced last time. Reading only the latter
+    made every bundle record zero -- which is what they all contain, so the field has never once
+    held a real number, and any analysis keyed on step count was silently working from nothing.
+    """
+    existing = getattr(investigation, "steps_used", None)
+    if isinstance(existing, int):
+        return existing
+    return len(getattr(investigation, "steps", None) or [])
 
 
 def _phase_json(timings: Any) -> dict[str, dict[str, float]]:

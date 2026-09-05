@@ -422,7 +422,20 @@ class TestPromptConstruction:
     def test_verdict_schema_is_closed_and_enumerated(self) -> None:
         assert VERDICT_SCHEMA["additionalProperties"] is False
         assert set(VERDICT_SCHEMA["properties"]["verdict"]["enum"]) == {v.value for v in Verdict}
-        assert VERDICT_SCHEMA["required"] == ["verdict", "reason"]
+        assert set(VERDICT_SCHEMA["required"]) == {"verdict", "reason"}
+
+    def test_the_reason_is_emitted_before_the_verdict(self) -> None:
+        """Structured output is one left-to-right pass over these properties, so the order
+        decides what the model has available when it answers each field.
+
+        With the verdict first, it committed to supported/unsupported/overstated and then wrote
+        a justification for whatever it had already said — the verdict fixed, the reasoning
+        rewritten to fit. This codebase paid for the same mistake once already, when the report
+        schema emitted its executive summary before the findings that summary rests on.
+
+        Asserted on `properties`, which is what governs generation order; `required` is a set.
+        """
+        assert list(VERDICT_SCHEMA["properties"]) == ["reason", "verdict"]
 
 
 class TestTenantScoping:

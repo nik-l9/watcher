@@ -378,15 +378,30 @@ class TestFailuresAreClassified:
         assert "schema too large" in str(caught.value)
 
     async def test_no_choices_is_an_error_rather_than_an_empty_answer(self) -> None:
-        """A silently empty response would reach the loop as a turn with no tools and no text,
-        which it reads as a decision to conclude."""
+        """This test asserted the opposite of its own name, and pinned the defect in place.
+
+        A stream can end without ever sending a choice — a connection dropped after the headers,
+        a proxy emitting `[DONE]` with no data, a 200 with an empty body. That returned a turn
+        with no text and no tool calls, which `wants_tools` reads as False and the loop reads as
+        the analyst deciding it is finished: the run drafted a report from whatever evidence it
+        had and recorded no error anywhere. The `choice is None` guards were unreachable.
+        """
         client = _FakeClient([_Chunk(usage=_Usage(prompt=1, completion=0))])
-        llm = _llm(client)
-        # Assembly always yields one choice, so this asserts the shape rather than the branch:
-        # an empty stream produces an empty turn, not a fabricated answer.
-        response = await llm.complete(system="s", messages=[])
+        with pytest.raises(LLMError, match="carried no choices"):
+            await _llm(client).complete(system="s", messages=[])
+
+    async def test_a_turn_of_genuinely_empty_text_is_not_an_error(self) -> None:
+        """The distinction the fix turns on. A model may answer with nothing and mean it; only a
+        stream that never sent a choice is a failure."""
+        client = _FakeClient(
+            [
+                _Chunk([_StreamChoice(_Delta(content=""), "stop")]),
+                _Chunk(usage=_Usage(prompt=1, completion=0)),
+            ]
+        )
+        response = await _llm(client).complete(system="s", messages=[])
         assert response.text == ""
-        assert response.tool_requests == []
+        assert response.stop_reason == "end_turn"
 
 
 class TestConstruction:
@@ -650,3 +665,193 @@ class TestJsonObjectModeNeedsTheSchemaInThePrompt:
         text = _schema_instruction({"type": "object"}).lower()
         assert "nothing else" in text
         assert "code fences" in text
+
+
+class TestAContradictoryTurnIsNotSilentlyAccepted:
+    """Every shape here ends the same way if it is let through: `wants_tools` is False, the loop
+    reads the turn as a decision to conclude, and the run drafts from partial evidence looking
+    healthy. That is the expensive failure — not a crash, a plausible short answer."""
+
+    async def test_a_content_filter_refusal_raises(self) -> None:
+        """`structured()` checked refusal and `complete()` did not. The Anthropic adapter raises
+        on exactly this, because an investigation that silently drops a refused step presents an
+        incomplete picture as a complete one."""
+        client = _FakeClient(
+            [
+                _Chunk(
+                    [_StreamChoice(_Delta(refusal="I can't help with that."), "content_filter")]
+                ),
+                _Chunk(usage=_Usage(prompt=5, completion=1)),
+            ]
+        )
+        with pytest.raises(LLMError, match="declined by a content filter"):
+            await _llm(client).complete(system="s", messages=[])
+
+    async def test_tool_calls_finish_with_no_usable_call_raises(self) -> None:
+        """The provider said it stopped to call tools and named none. The adapter has already
+        computed the contradiction; discarding it lets the loop end early."""
+        client = _FakeClient(
+            [
+                _Chunk(
+                    [
+                        _StreamChoice(
+                            _Delta(tool_calls=[_CallFragment(0, id="c1", args="{}")]),
+                            "tool_calls",
+                        )
+                    ]
+                ),
+                _Chunk(usage=_Usage(prompt=1, completion=1)),
+            ]
+        )
+        with pytest.raises(LLMError, match="no usable tool call"):
+            await _llm(client).complete(system="s", messages=[])
+
+
+class TestStreamAssemblyToleratesANonconformingProxy:
+    """Reaching endpoints this project does not control is the adapter's reason for existing, and
+    the SDK builds these deltas with `construct_type`, which does not validate."""
+
+    async def test_a_missing_index_does_not_kill_the_investigation(self) -> None:
+        """Mixed `None` and integer keys raise `TypeError` from `sorted`, which escapes every
+        handler in `_call` — so the loop's `except LLMError` misses it and the run dies with a
+        traceback, discarding the evidence it had gathered."""
+        client = _FakeClient(
+            [
+                _Chunk(
+                    [
+                        _StreamChoice(
+                            _Delta(tool_calls=[_CallFragment(0, id="c1", name="t__a", args="{}")])
+                        )
+                    ]
+                ),
+                _Chunk(
+                    [
+                        _StreamChoice(
+                            _Delta(
+                                tool_calls=[_CallFragment(None, id="c2", name="t__b", args="{}")]
+                            ),
+                            "tool_calls",
+                        )
+                    ]
+                ),
+                _Chunk(usage=_Usage(prompt=1, completion=1)),
+            ]
+        )
+        response = await _llm(client).complete(system="s", messages=[])
+        assert {r.name for r in response.tool_requests} == {"t__a", "t__b"}
+
+    async def test_parallel_calls_at_different_indices_both_survive(self) -> None:
+        """The reason indices are the key at all, and it had no test."""
+        client = _FakeClient(
+            [
+                _Chunk(
+                    [
+                        _StreamChoice(
+                            _Delta(
+                                tool_calls=[
+                                    _CallFragment(
+                                        0,
+                                        id="c1",
+                                        name="posthog__event_trend",
+                                        args='{"event":"a"}',
+                                    ),
+                                    _CallFragment(
+                                        1, id="c2", name="github__commits", args='{"repo":"b"}'
+                                    ),
+                                ]
+                            ),
+                            "tool_calls",
+                        )
+                    ]
+                ),
+                _Chunk(usage=_Usage(prompt=1, completion=1)),
+            ]
+        )
+        response = await _llm(client).complete(system="s", messages=[])
+        assert [r.name for r in response.tool_requests] == [
+            "posthog__event_trend",
+            "github__commits",
+        ]
+        assert response.tool_requests[0].arguments == {"event": "a"}
+
+
+class TestTheProvidersMessageSurvives:
+    async def test_a_mid_stream_error_carries_its_text(self) -> None:
+        """A capacity error delivered inside a 200 arrives as a bare `APIError`, so the class
+        name alone reads "APIError" and tells whoever finds it in the investigation row nothing.
+        That is F-13, and proxies are where it bites."""
+        import openai
+
+        client = _FakeClient(
+            error=openai.APIError("upstream is rate limited", request=None, body=None)
+        )
+        with pytest.raises(LLMError) as caught:
+            await _llm(client).complete(system="s", messages=[])
+        assert "rate limited" in str(caught.value)
+
+    async def test_a_transient_error_is_retried(self) -> None:
+        """F-19 on this path. The SDK's own retry keys on status and never sees an error
+        delivered inside a 200; the Anthropic adapter carries this because one `Overloaded` at
+        the drafting step discarded a completed 127-second investigation."""
+        import openai
+
+        class _FailsOnce(_FakeClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    [
+                        _Chunk([_StreamChoice(_Delta(content="ok"), "stop")]),
+                        _Chunk(usage=_Usage(prompt=1, completion=1)),
+                    ]
+                )
+                self.attempts = 0
+
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise openai.APIError("overloaded", request=None, body=None)
+                return await super().create(**kwargs)
+
+        client = _FailsOnce()
+        response = await _llm(client).complete(system="s", messages=[])
+        assert response.text == "ok"
+        assert client.attempts == 2
+
+
+class TestUsageIsNotUnderstated:
+    def test_a_provider_reporting_prompt_net_of_cache_is_not_mispriced(self) -> None:
+        """Several compatible providers report `prompt_tokens` already excluding the cached
+        share, and then `cached > prompt`. A blind subtraction clamped to zero and moved the
+        whole prompt into the cache-read bucket, priced at a tenth — a hundred thousand fresh
+        input tokens billing as ten thousand.
+
+        The direction is why this needs a branch: `spend.py` exists on the principle that a
+        report which overstates is one somebody checks, while one that understates is trusted.
+        """
+        usage = _usage(type("_C", (), {"usage": _Usage(prompt=100, completion=10, cached=400)})())
+        assert usage.input_tokens == 100
+        assert usage.cache_read_input_tokens == 400
+
+    def test_the_ordinary_case_still_subtracts(self) -> None:
+        usage = _usage(type("_C", (), {"usage": _Usage(prompt=1000, completion=50, cached=800)})())
+        assert usage.input_tokens == 200
+
+
+class TestConstructionRespectsThePermittedFlag:
+    def test_an_unpermitted_model_from_the_table_is_refused(self) -> None:
+        """`permitted` is a cost decision — "described here but must not be constructed". The
+        Anthropic adapter enforces it and this one did not, so the guard had a hole on the newer
+        provider, which is the one reaching endpoints with unknown pricing."""
+        with pytest.raises(ValueError, match="declared but not permitted"):
+            OpenAICompatLLM(model="gpt-5.2-mini", client=_FakeClient())  # type: ignore[arg-type]
+
+    def test_an_explicit_card_still_admits_a_proxy_model(self) -> None:
+        """A caller passing a card has declared the model deliberately, which is how a proxy
+        reaches a model this project has no card for."""
+        card = ModelCard(
+            id="gpt-5.2-mini",
+            context_window=100_000,
+            max_output_tokens=8_000,
+            provider="openai_compat",
+        )
+        llm = OpenAICompatLLM(model="gpt-5.2-mini", card=card, client=_FakeClient())  # type: ignore[arg-type]
+        assert llm.card.permitted is False

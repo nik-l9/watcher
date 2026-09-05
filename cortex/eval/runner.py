@@ -525,6 +525,14 @@ class EvalHarness:
                         investigation_id=investigation_id,
                         report=gate_result.report,
                     )
+                # Folded into the total and attributed to the phase, which the production path
+                # already does (`service.py` sums both before billing) and this one did not.
+                # The scorecard reads `investigation.usage.total`, so every token figure the
+                # eval has ever printed omitted verification -- and every bundle recorded zero
+                # output tokens for this phase, leaving its output-boundness unmeasured while
+                # latency work leaned on exactly that number.
+                investigation.usage = investigation.usage + verification.usage
+                investigation.timings.record_usage(VERIFY, verification.usage)
             except ReportRejected as exc:
                 reason = f"report rejected by the verifier: {exc}"
                 await self._capture_rejection(
@@ -563,6 +571,8 @@ class EvalHarness:
                         question=scenario.question,
                         report=applied.report,
                     )
+                investigation.usage = investigation.usage + sufficiency.usage
+                investigation.timings.record_usage(SUFFICIENCY, sufficiency.usage)
                 applied = sufficiency.apply(applied.report)
             except ReportRejected as exc:
                 reason = f"report rejected by the sufficiency gate: {exc}"

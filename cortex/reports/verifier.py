@@ -315,12 +315,38 @@ class Verdict(enum.StrEnum):
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["verdict", "reason"],
+    # **`reason` is emitted before `verdict`, and the order is the point.**
+    #
+    # Structured output is one left-to-right pass over these properties, so a field placed above
+    # its own inputs has to be answered before those inputs exist. With the verdict first, the
+    # model committed to supported/unsupported/overstated and then wrote a justification for
+    # whatever it had already said -- which is rationale anchoring: the verdict holds while the
+    # reasoning is rewritten to fit it. arXiv 2605.23970 measures exactly this and finds that
+    # grounding the evidence before scoring cuts revision susceptibility from 75-85% to 5-22%.
+    #
+    # This codebase has already paid for the same mistake once: the report schema emitted its
+    # executive summary and confidence before the findings they summarise, and the fix was to
+    # move them last. That precedent is why this one is worth making without waiting for a
+    # measurement -- it is the same defect in a smaller schema.
+    #
+    # This is the cheap half of that paper's intervention. The fuller version locks a *quotation*
+    # from the evidence before scoring, which costs output tokens on every claim -- roughly ten
+    # per report against a verify phase already costing 12s -- so it is deliberately not taken
+    # here without a measurement to justify the latency.
+    "required": ["reason", "verdict"],
     "properties": {
+        "reason": {
+            "type": "string",
+            "description": (
+                "First, before deciding: name what the cited evidence actually shows about this "
+                "claim, and the specific gap if there is one. One sentence."
+            ),
+        },
         "verdict": {
             "type": "string",
             "enum": [v.value for v in Verdict],
             "description": (
+                "The judgement that follows from the reason above. "
                 "supported: the cited evidence establishes the claim as written. "
                 "overstated: the claim's substance holds but it goes beyond the evidence -- "
                 "stronger, more certain or more causal than the data warrants, or carrying a "
@@ -328,10 +354,6 @@ VERDICT_SCHEMA: dict[str, Any] = {
                 "unsupported: the cited evidence does not establish the claim, is "
                 "about something else, or contradicts it."
             ),
-        },
-        "reason": {
-            "type": "string",
-            "description": "One sentence naming the specific gap, or why it holds.",
         },
     },
 }

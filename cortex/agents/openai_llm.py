@@ -66,6 +66,20 @@ MAX_RETRIES = 2
 #: of how a transport counts chunks.
 _READ_TIMEOUT_SECONDS = 600.0
 
+#: Attempts after the first, for a failure that says nothing about the request.
+#:
+#: F-19 on this path. A capacity or rate-limit error from an OpenAI-compatible endpoint often
+#: arrives *inside* a 200, as an SSE error event, which the SDK raises as a bare `APIError` --
+#: so the client's own status-keyed retry never sees it. The Anthropic adapter carries this for
+#: the same reason, recorded there: one `Overloaded` at the drafting step discarded a completed
+#: 127-second investigation. Drafting is where it hurts, because every tool call is already paid
+#: for by then.
+_TRANSIENT_RETRIES = 2
+
+#: Backoff before each retry. Fixed rather than jittered: with two attempts there is no herd to
+#: spread out, and a predictable delay is easier to reason about against the deadline.
+_BACKOFF_SECONDS = (2.0, 8.0)
+
 #: Statuses that will not start working on the next attempt. 401 is a bad or absent key; 403 is
 #: a key without access to this model, which is ordinary on a proxy where entitlements differ
 #: per account. Both are configuration, and neither improves by being retried.
@@ -74,6 +88,14 @@ _TERMINAL_STATUSES = frozenset({401, 403})
 #: OpenRouter's endpoint, because it is the one worth naming: a single key reaching many models
 #: is the cheapest way for someone to try this with whatever they already have.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+class _Transient(Exception):
+    """A failure worth one more attempt, carrying the error to raise if retries run out."""
+
+    def __init__(self, error: LLMError) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 class OpenAICompatLLM(LLM):
@@ -101,6 +123,15 @@ class OpenAICompatLLM(LLM):
         self._model = model
         self.model = model
         self.card = card if card is not None else card_for(model)
+        if card is None and not self.card.permitted:
+            # Checked only when the card came from the table. A caller passing one explicitly has
+            # declared the model deliberately, which is how a proxy reaches a model this project
+            # has no card for; a card the table marks unpermitted is one somebody chose not to
+            # run, and constructing it anyway is discovered on an invoice.
+            raise ValueError(
+                f"{model!r} is declared but not permitted. Set permitted=True on its card once "
+                "an eval run says it should be, or pass a card to declare it deliberately."
+            )
         if self.card.provider != "openai_compat":
             raise ValueError(
                 f"{model!r} is declared as a {self.card.provider} model. Calling it through the "
@@ -139,9 +170,20 @@ class OpenAICompatLLM(LLM):
         completion = await self._call(deadline=self._deadline, **kwargs)
         choice = completion.choices[0] if completion.choices else None
         if choice is None:
-            raise LLMError(f"{self.name}: response carried no choices")
+            raise LLMError(
+                f"{self.name}: the response stream carried no choices. This is a failed turn, "
+                "not an empty answer -- treating it as one would let the loop read it as a "
+                "decision to conclude and draft from whatever evidence it had."
+            )
 
         message = choice.message
+        if getattr(message, "refusal", None):
+            # Surfaced rather than returned as an empty turn, matching the Anthropic adapter:
+            # the same prompt will be declined again, and an investigation that silently drops a
+            # refused step presents an incomplete picture as a complete one.
+            raise LLMError(
+                f"{self.name}: request declined by a content filter: {message.refusal[:200]}"
+            )
         requests: list[ToolRequest] = []
         for call in message.tool_calls or []:
             function = getattr(call, "function", None)
@@ -159,11 +201,20 @@ class OpenAICompatLLM(LLM):
                     arguments=_loads_object(function.arguments),
                 )
             )
+        stop_reason = _stop_reason(choice.finish_reason)
+        if stop_reason == "tool_use" and not requests:
+            # The provider said it stopped to call tools and named none. Raised rather than
+            # returned, because a turn with no tool requests is exactly what the loop reads as
+            # "the analyst is finished" -- so the contradiction the adapter has already computed
+            # would otherwise be discarded and the run would end early looking healthy.
+            raise LLMError(
+                f"{self.name}: finish_reason said tool_calls and no usable tool call arrived"
+            )
         return LLMResponse(
             text=message.content or "",
             tool_requests=requests,
             usage=_usage(completion),
-            stop_reason=_stop_reason(choice.finish_reason),
+            stop_reason=stop_reason,
         )
 
     async def structured(
@@ -231,6 +282,19 @@ class OpenAICompatLLM(LLM):
         reasoning model can outlive a non-streaming timeout, and a request that dies at the
         transport layer is indistinguishable from a hung one.
         """
+        for attempt in range(_TRANSIENT_RETRIES + 1):
+            try:
+                return await self._attempt(deadline=deadline, **kwargs)
+            except _Transient as exc:
+                if attempt >= _TRANSIENT_RETRIES:
+                    raise exc.error from exc.error
+                await asyncio.sleep(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
+        # Unreachable: the last attempt re-raises above. Present so a future change to the loop
+        # bounds cannot turn this into a function that returns None.
+        raise LLMError(f"{self.name}: retries exhausted without a response")
+
+    async def _attempt(self, *, deadline: float, **kwargs: Any) -> Any:
+        """One request. Raises `_Transient` for a failure worth trying again."""
         try:
             async with asyncio.timeout(deadline):
                 stream = await self._client.chat.completions.create(
@@ -261,9 +325,24 @@ class OpenAICompatLLM(LLM):
                 raise LLMAuthenticationFailed(detail) from exc
             raise LLMError(detail) from exc
         except openai.APIError as exc:
+            # A mid-stream capacity error arrives here as a bare `APIError`, and it is the one
+            # worth another attempt: it says nothing about the request, so the same bytes may
+            # well succeed a moment later. An authentication failure never reaches this branch,
+            # and a status error is classified above.
+            if type(exc) is openai.APIError:
+                raise _Transient(
+                    LLMError(f"{self.name}: {exc.__class__.__name__}: {_message_of(exc)}")
+                ) from exc
             # APITimeoutError is an APIError subclass, so a hung request lands here rather than
             # escaping as something the loop cannot classify.
-            raise LLMError(f"{self.name}: {exc.__class__.__name__}") from exc
+            #
+            # The message is carried, not just the class. A capacity or rate-limit error
+            # delivered *inside* a 200 as an SSE error event arrives here as a bare `APIError`,
+            # so the class name alone reads "APIError" and tells whoever finds it in the
+            # investigation row nothing at all. That is F-13, and proxies are where it bites:
+            # their mid-stream errors are the common failure and the message is the only thing
+            # naming which upstream refused and why.
+            raise LLMError(f"{self.name}: {exc.__class__.__name__}: {_message_of(exc)}") from exc
 
 
 async def _assemble(stream: Any) -> Any:
@@ -278,11 +357,18 @@ async def _assemble(stream: Any) -> Any:
     calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: Any = None
+    #: Whether the provider ever sent a choice. A stream can end without one -- a dropped
+    #: connection after the headers, a proxy emitting `[DONE]` with no data, a 200 with an empty
+    #: body -- and the difference between that and a turn of empty text is the difference
+    #: between a failure and a decision to stop. Tracked rather than inferred from empty text,
+    #: because a model genuinely may answer with nothing.
+    saw_choice = False
 
     async for chunk in stream:
         if getattr(chunk, "usage", None) is not None:
             usage = chunk.usage
         for choice in getattr(chunk, "choices", None) or []:
+            saw_choice = True
             if choice.finish_reason:
                 finish_reason = choice.finish_reason
             delta = getattr(choice, "delta", None)
@@ -309,10 +395,22 @@ async def _assemble(stream: Any) -> Any:
     return _Completion(
         text="".join(text),
         refusal="".join(refusal) or None,
-        calls=[calls[index] for index in sorted(calls)],
+        calls=[calls[index] for index in _ordered(calls)],
         finish_reason=finish_reason,
         usage=usage,
+        empty=not saw_choice,
     )
+
+
+def _ordered(calls: dict[Any, dict[str, Any]]) -> list[Any]:
+    """Call indices in a stable order, tolerating one that is not an integer.
+
+    `index` is required by the API and built with `construct_type`, which does not validate --
+    so a nonconforming proxy can send `None`, and sorting mixed types raises a `TypeError` that
+    escapes every handler in `_call` and kills the investigation with a traceback. Reaching
+    nonconforming proxies is this adapter's whole reason for existing.
+    """
+    return sorted(calls, key=lambda index: (index is None, index if index is not None else 0))
 
 
 class _Completion:
@@ -330,9 +428,19 @@ class _Completion:
         calls: list[dict[str, Any]],
         finish_reason: str | None,
         usage: Any,
+        empty: bool = False,
     ) -> None:
         self.usage = usage
-        self.choices = [_Choice(text=text, refusal=refusal, calls=calls, finish=finish_reason)]
+        # No choices when the provider sent none, which makes the callers' `choice is None`
+        # guards live rather than dead code. They were unreachable before, and the consequence
+        # was that an empty stream returned a turn with no text and no tool calls -- which the
+        # loop reads as the analyst deciding it is finished, so the run drafted a report from
+        # partial evidence and recorded no error anywhere.
+        self.choices = (
+            []
+            if empty
+            else [_Choice(text=text, refusal=refusal, calls=calls, finish=finish_reason)]
+        )
 
 
 class _Choice:
@@ -535,8 +643,18 @@ def _usage(completion: Any) -> Usage:
     prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
     details = getattr(usage, "prompt_tokens_details", None)
     cached = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+    # **Only subtract where the cached share is genuinely included.** OpenAI counts cached tokens
+    # inside `prompt_tokens`, so subtracting is right there. Several compatible providers report
+    # `prompt_tokens` already net of the cache, and then `cached > prompt` -- where a blind
+    # subtraction clamped to zero and moved the whole prompt into the cache-read bucket, priced
+    # at a tenth. A hundred thousand fresh input tokens would have billed as ten thousand.
+    #
+    # The direction is what makes this worth a branch rather than a clamp: `spend.py` exists on
+    # the principle that a report which overstates is one somebody checks, while one that
+    # understates is one somebody trusts.
+    fresh = prompt - cached if cached <= prompt else prompt
     return Usage(
-        input_tokens=max(0, prompt - cached),
+        input_tokens=max(0, fresh),
         output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
         cache_read_input_tokens=cached,
     )

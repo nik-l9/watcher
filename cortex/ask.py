@@ -37,7 +37,7 @@ from cortex.agents.investigator import InvestigationFailed, Investigator
 from cortex.agents.progress import Phase, ProgressEvent, TerminalProgress, emit
 from cortex.agents.provider import build_llm
 from cortex.agents.service import confidence_score, record_usage
-from cortex.agents.timing import GATE, VERIFY
+from cortex.agents.timing import GATE, SUFFICIENCY, VERIFY
 from cortex.db.models import Investigation as InvestigationRow
 from cortex.db.models import InvestigationStatus, Report, Tenant
 from cortex.db.threads import ParentNotFound, ThreadTooDeep, check_parent
@@ -274,7 +274,10 @@ async def _sufficiency(
         return SufficiencyDecision(needed=False), AppliedSufficiency(report=report)
 
     started = time.monotonic()
-    with timings.measure(VERIFY):
+    # Attributed to SUFFICIENCY, not VERIFY. It was recorded under the verifier's phase, so the
+    # CLI's own breakdown charged this gate's seconds and tokens to the verifier and reported
+    # sufficiency as free -- on the `--real` runs the latency notes were written from.
+    with timings.measure(SUFFICIENCY):
         decision = await SufficiencyGate(llm).assess(
             session,
             tenant,
@@ -282,7 +285,7 @@ async def _sufficiency(
             question=question,
             report=report,
         )
-    timings.record_usage(VERIFY, decision.usage)
+    timings.record_usage(SUFFICIENCY, decision.usage)
     elapsed = time.monotonic() - started
 
     if not decision.needed:

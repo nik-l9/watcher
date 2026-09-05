@@ -116,7 +116,16 @@ class ConformalResult:
                 "an inability to test, not evidence the change is unreal. A longer run of "
                 "comparable days before the break would resolve it."
             )
-        floor = f", the floor for a {self.total_days}-day window" if self.at_floor else ""
+        # The floor is stated on every result, not only when p has landed on it. A p of 0.20
+        # against a floor of 0.14 reads as "not significant" and is mostly a statement about the
+        # window: no evidence, however strong, could have produced much less. Naming the smallest
+        # attainable value is what separates "we looked and found nothing" from "this window
+        # could not have found much", and it costs a clause.
+        floor = (
+            f", which is the floor for a {self.total_days}-day window"
+            if self.at_floor
+            else f" (the smallest attainable here was {self.p_floor:.4f})"
+        )
         return (
             f"Permutation p = {self.p_value:.4f}{floor} for a break at "
             f"{self.at.isoformat()} ({self.pre_days} days before, {self.post_days} after). "
