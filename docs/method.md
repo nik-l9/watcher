@@ -155,6 +155,29 @@ runs, and fixtures describing repositories their own discovery survey denied exi
 up as a dimension reading slightly low — 0.77 to 0.90 — which reads exactly like a working
 defence. Every run therefore captures replayable bundles, and failed attempts are captured too.
 
+**A hallucination count of zero rewards silence, so every question is asked twice.** The suite's
+hard bar is that no unverified claim reaches a reader. A system that declined every question
+would clear it perfectly, and no other dimension here could tell that apart from one answering
+well. That matters because every safeguard has a cost in over-abstention, and the cost is
+invisible from the answerable half alone.
+
+So two scenarios carry a **decline twin**: the same question, the same movement, one connector
+blanked so the cause is no longer identifiable. The mobile regression with no change to pin it
+on; the paid-search collapse with no record of why the channel stopped. The twin is derived from
+its parent in code rather than copied, because a copied twin drifts the first time either is
+edited and then the pair is a comparison between two things that differ in ways nobody tracked.
+
+A change to any gate now has to show the twins improving *without* their parents getting worse.
+Before this existed, a stricter gate always looked like an improvement.
+
+**The instrument needs auditing as often as the analyst does.** Six defects of one family were
+found in the fixtures over a single day, all the same shape: *a fixture answering a question it
+was not asked.* A canned payload returns whatever it was written with — one fixed series for any
+date range, any event name, any interval — so an analyst asking the discriminating question got
+data for a different one. One of those made a connector unreachable while the scenario still
+scored 1.00 from another source, which is the reading that should worry a reader most: the score
+was not wrong about the answer, it was measuring something else entirely.
+
 ---
 
 ## What is deliberately not claimed
