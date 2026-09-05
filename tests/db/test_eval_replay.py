@@ -527,3 +527,89 @@ class TestARejectedAttemptIsStillCaptured:
             )
         )
         assert load_bundle(path).rejected_because is None
+
+
+class TestTheSummaryTravelsForVerifierPrecision:
+    """`verifier_precision` asks whether the *delivered summary* still names the planted cause.
+
+    That makes it the first dimension to read `verification.report.executive_summary` during
+    scoring rather than the verdicts alone. The equality test above compares every dimension, but
+    its stub carries no unsupported verdict, so the branch that can score below 1.00 was never
+    exercised through a bundle — and a replay that lost the summary would report a clean 1.00
+    forever, which is the failure mode this project keeps finding in its own safeguards.
+    """
+
+    async def test_a_bundle_reproduces_a_penalised_reading(
+        self, session: AsyncSession, tmp_path: Path
+    ) -> None:
+        from cortex.eval.fixtures import alternatives_of, by_name
+        from cortex.reports.verifier import ClaimVerdict, VerificationResult
+        from cortex.reports.verifier import Verdict as ClaimVerdictKind
+
+        scenario = by_name("campaign_traffic_drop")
+        signal = alternatives_of(scenario.ground_truth.required_signals[0])[0]
+
+        tenant, investigation_id, report, gate, evidence_id = await _scored_attempt(session)
+        # A summary that does NOT name the cause, and a removed claim that does: the run-32
+        # shape, where every removal was correct and the answer was poorer for it.
+        delivered = report.model_copy(
+            update={
+                "executive_summary": [
+                    Claim(
+                        text="Paid search session volume collapsed in the second half of June.",
+                        evidence_ids=[evidence_id],
+                    )
+                ]
+            }
+        )
+        verification = VerificationResult(
+            report=delivered,
+            verdicts=[
+                ClaimVerdict(
+                    location="findings[0].claims[0]",
+                    claim_text=f"The {signal} ending drove the fall, one day before it began.",
+                    verdict=ClaimVerdictKind.UNSUPPORTED,
+                    reason="the cited evidence does not establish when the fall began",
+                )
+            ],
+        )
+
+        scorer = Scorer()
+        before = await scorer.score(
+            session,
+            tenant,
+            investigation_id=investigation_id,
+            scenario=scenario,
+            investigation=_Investigation(),
+            gate_result=gate,
+            verification=verification,
+        )
+        path = await write_bundle(
+            session,
+            tenant,
+            investigation_id=investigation_id,
+            scenario=scenario.name,
+            attempt=1,
+            investigation=_Investigation(),
+            gate_result=gate,
+            verification=verification,
+            directory=tmp_path,
+        )
+        replayed_tenant, replayed_id, view, gate2, verification2, _s = await replay_bundle(
+            session, load_bundle(path)
+        )
+        after = await scorer.score(
+            session,
+            replayed_tenant,
+            investigation_id=replayed_id,
+            scenario=scenario,
+            investigation=view,
+            gate_result=gate2,
+            verification=verification2,
+        )
+
+        live = {d.name: d.score for d in before.dimensions}
+        replay = {d.name: d.score for d in after.dimensions}
+        # The reading is penalised, and it survives the round trip rather than reading clean.
+        assert live["verifier_precision"] == 0.0
+        assert replay["verifier_precision"] == live["verifier_precision"]

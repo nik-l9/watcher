@@ -1872,8 +1872,22 @@ def measurement_stopped(seed: int = 6) -> Scenario:
                 "business cause."
             ),
             required_signals=(
-                # The stop itself, however the report phrases it.
-                ("stopped", "no data after", "collection", "truncated", "ends"),
+                # The stop itself, however the report phrases it -- including the tense.
+                # "stopped" alone missed a summary reading "GA4's session data simply *stops*
+                # after 2026-08-03", which is the answer, stated in the present tense because
+                # the series still is not reporting. Scoring which tense a correct report chose
+                # is the same over-specification the corroboration signal below already cost
+                # once.
+                (
+                    "stopped",
+                    "stops",
+                    "stop reporting",
+                    "no data after",
+                    "no rows",
+                    "collection",
+                    "truncated",
+                    "ends",
+                ),
                 # And the second line, which is what turns noticing into concluding. A report
                 # naming only the gap has found a symptom and stopped. Any of the healthy
                 # PostHog series satisfies it: they are alternatives, not a checklist, and the

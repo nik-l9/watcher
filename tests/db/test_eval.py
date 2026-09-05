@@ -2088,3 +2088,52 @@ class TestAPlainTrendSeriesMustBeDerived:
                     "posthog__event_trend", {"event": truth.event, "interval": "day"}
                 )
                 assert payload["total"] == sum(r["value"] for r in payload["series"])
+
+
+class TestThePostLoopPhasesAreAccounted:
+    """The eval's token figure omitted the verifier and the sufficiency gate entirely.
+
+    Production has always been right — `service.py` sums `investigation.usage`, the sufficiency
+    usage and the verification usage before billing. The eval path summed none of it, and the
+    scorecard reads `investigation.usage.total`, so every token figure the suite has printed
+    understated what the run cost. Every bundle also recorded zero output tokens for both
+    phases, which left their output-boundness unmeasured while latency work leaned on exactly
+    that number.
+    """
+
+    async def test_verification_tokens_reach_the_total_and_the_phase(
+        self, session: AsyncSession
+    ) -> None:
+        from cortex.agents.llm import Usage
+        from cortex.agents.timing import SUFFICIENCY, VERIFY, Timings
+        from cortex.reports.verifier import VerificationResult
+
+        timings = Timings()
+        started = Usage(input_tokens=100, output_tokens=50)
+        verification = Usage(input_tokens=40, output_tokens=20)
+        sufficiency = Usage(input_tokens=10, output_tokens=5)
+
+        # The arithmetic the runner performs, asserted directly: both are folded into the total
+        # and attributed to their own phase.
+        total = started + verification + sufficiency
+        timings.record_usage(VERIFY, verification)
+        timings.record_usage(SUFFICIENCY, sufficiency)
+
+        assert total.total == 225
+        assert timings.phases[VERIFY].usage.output_tokens == 20
+        assert timings.phases[SUFFICIENCY].usage.output_tokens == 5
+        assert isinstance(VerificationResult(report=None).usage, Usage)  # type: ignore[arg-type]
+
+    def test_the_runner_folds_both_into_the_investigation_usage(self) -> None:
+        """Asserted against the source, because the alternative is an eval run to observe it and
+        the property is a single line each. If either fold is removed, the scorecard silently
+        goes back to understating and nothing else notices."""
+        import inspect
+
+        from cortex.eval import runner
+
+        source = inspect.getsource(runner)
+        assert "investigation.usage = investigation.usage + verification.usage" in source
+        assert "investigation.usage = investigation.usage + sufficiency.usage" in source
+        assert "record_usage(VERIFY, verification.usage)" in source
+        assert "record_usage(SUFFICIENCY, sufficiency.usage)" in source

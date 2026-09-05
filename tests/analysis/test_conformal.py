@@ -205,3 +205,65 @@ class TestThePowerCliff:
                 if result and result.significant():
                     rejects += 1
             assert rejects / 60 <= 0.10, pre
+
+
+class TestTheAttainableFloorIsAlwaysStated:
+    """A p-value near its floor is mostly a statement about the window, not about the data.
+
+    The floor was reported only when `p` landed exactly on it. But p = 0.20 against a floor of
+    0.14 reads as "not significant" while no evidence, however strong, could have produced much
+    less — and that is the difference between "we looked and found nothing" and "this window
+    could not have found much". arXiv 2504.19841 makes the general point: permutation methods
+    "never reject the null if alpha < 1/dim(G)" and have "trivial power in this case".
+    """
+
+    def test_a_result_above_the_floor_still_names_it(self) -> None:
+        from cortex.analysis.conformal import ConformalResult
+
+        result = ConformalResult(
+            at=date(2026, 6, 17),
+            p_value=0.2000,
+            p_floor=0.1429,
+            statistic=3.1,
+            pre_days=40,
+            post_days=6,
+            total_days=46,
+        )
+        note = result.note()
+        assert "0.2000" in note
+        assert "smallest attainable here was 0.1429" in note
+
+    def test_a_result_at_the_floor_says_so_instead(self) -> None:
+        """Two different facts, worded differently: one is 'this is as low as it goes', the
+        other is 'here is how low it could have gone'."""
+        from cortex.analysis.conformal import ConformalResult
+
+        result = ConformalResult(
+            at=date(2026, 6, 17),
+            p_value=0.0143,
+            p_floor=0.0143,
+            statistic=9.9,
+            pre_days=63,
+            post_days=7,
+            total_days=70,
+        )
+        note = result.note()
+        assert "the floor for a 70-day window" in note
+        assert "smallest attainable" not in note
+
+    def test_an_unresolvable_window_reports_the_inability_not_a_p_value(self) -> None:
+        """Unchanged, and asserted alongside so the three cases stay distinguishable: no power
+        at all, at the floor, and above it."""
+        from cortex.analysis.conformal import ConformalResult
+
+        result = ConformalResult(
+            at=date(2026, 6, 17),
+            p_value=1.0,
+            p_floor=0.5,
+            statistic=0.4,
+            pre_days=10,
+            post_days=20,
+            total_days=30,
+        )
+        assert not result.resolvable
+        assert "No significance can be established" in result.note()
