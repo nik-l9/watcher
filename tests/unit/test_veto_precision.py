@@ -55,7 +55,7 @@ class TestWithholdingThePlantedCauseIsPenalised:
             "budget, cutting Paid Search traffic and thus signups.",
         )
         assert dimension.score < 1.0
-        assert "withheld the planted cause" in dimension.detail
+        assert "the summary lost the planted cause" in dimension.detail
 
     def test_withholding_something_else_is_not_penalised(self) -> None:
         """The gate is *supposed* to withhold claims the evidence cannot carry. Penalising every
@@ -113,3 +113,38 @@ class TestItNeverGates:
             "The spring paid-search ad campaign was paused on June 14, cutting signups.",
         )
         assert not dimension.gates
+
+
+class TestItScoresWhatTheSummaryLostNotWhatWasWithheld:
+    """The same sharpening `verifier_precision` already had, applied to the other mechanism.
+
+    The two dimensions ask one question of the two things that remove claims, and measuring them
+    differently made this one report harm where there was none. In run 33 it read 0.50 on
+    `measurement_stopped` because a withheld claim said "collection stopped" — while the
+    delivered summary said GA4's data "simply *stops* after 2026-08-03", which is the same answer
+    in the present tense. A reader lost nothing.
+    """
+
+    def test_a_withheld_claim_whose_cause_survives_in_the_summary_is_clean(self) -> None:
+        scenario = by_name("campaign_traffic_drop")
+        applied = _applied("The campaign ending drove the fall.")
+        applied.report.executive_summary[0] = Claim(
+            text="Signups fell because the campaign budget was exhausted on 14 June.",
+            evidence_ids=[uuid.uuid4()],
+        )
+        scored = Scorer()._veto_precision(scenario, applied)
+        assert scored.score == 1.0
+        assert "still names the planted cause" in scored.detail
+
+    def test_it_still_penalises_a_summary_that_lost_it(self) -> None:
+        """The run-15 failure this dimension was built for: the cause cut from the summary,
+        surviving only in a finding, with `accuracy` reading 1.00 throughout."""
+        scenario = by_name("campaign_traffic_drop")
+        applied = _applied("The campaign ending drove the fall.")
+        applied.report.executive_summary[0] = Claim(
+            text="Paid search sessions fell sharply in the second half of June.",
+            evidence_ids=[uuid.uuid4()],
+        )
+        scored = Scorer()._veto_precision(scenario, applied)
+        assert scored.score == 0.0
+        assert "appears nowhere in the delivered summary" in scored.detail

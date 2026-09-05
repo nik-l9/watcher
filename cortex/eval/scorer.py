@@ -871,23 +871,42 @@ class Scorer:
             return Dimension(name="veto_precision", score=1.0, detail="the gate withheld nothing")
 
         withheld = [(r.text or "").lower() for r in sufficiency.rejections]
-        protected = [
-            describe_requirement(requirement)
+        # Scored on what the summary lost, matching `verifier_precision`. The two dimensions ask
+        # the same question of the two mechanisms that remove claims, and measuring them
+        # differently made one of them report harm where there was none: a withheld claim whose
+        # cause still appears in the delivered summary has cost the reader nothing.
+        #
+        # This is the sharper question in both directions. It caught a real loss on the verifier
+        # -- a summary describing a 68.4% collapse without naming the exhausted budget behind it
+        # -- and it clears a reading here where the summary says the data "stops after
+        # 2026-08-03" in its own words.
+        surviving = " ".join(claim.text for claim in sufficiency.report.executive_summary).lower()
+        cut = [
+            requirement
             for requirement in truth.required_signals
             if any(alt.lower() in text for text in withheld for alt in alternatives_of(requirement))
+        ]
+        protected = [
+            describe_requirement(requirement)
+            for requirement in cut
+            if not any(alt.lower() in surviving for alt in alternatives_of(requirement))
         ]
         if not protected:
             return Dimension(
                 name="veto_precision",
                 score=1.0,
-                detail=f"{len(withheld)} claim(s) withheld, none carrying the planted cause",
+                detail=(
+                    f"{len(withheld)} claim(s) withheld, the summary still names the planted cause"
+                    if cut
+                    else f"{len(withheld)} claim(s) withheld, none carrying the planted cause"
+                ),
             )
         return Dimension(
             name="veto_precision",
             score=round(1.0 - len(protected) / len(truth.required_signals), 4),
             detail=(
-                f"the gate withheld the planted cause: {', '.join(protected)} appeared in a "
-                "claim it removed"
+                f"the summary lost the planted cause: {', '.join(protected)} was in a claim the "
+                "gate withheld and appears nowhere in the delivered summary"
             ),
         )
 
