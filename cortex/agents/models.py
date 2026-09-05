@@ -50,6 +50,11 @@ from typing import Literal
 #: "none"     — the parameter is not sent at all.
 ThinkingStyle = Literal["adaptive", "budget", "none"]
 
+#: Adapters that exist. Not a free-form string: a typo in a card would otherwise route a
+#: request to a provider that is never constructed, and the failure would surface as a model
+#: that simply never answers.
+Provider = Literal["anthropic", "openai_compat"]
+
 
 class UnknownModel(ValueError):
     """A model with no capability declaration.
@@ -94,6 +99,22 @@ class ModelCard:
     #: exactly one model as a cost decision (see `DEFAULT_MODEL`); the others are declared
     #: so that permitting one is a single flag rather than research.
     permitted: bool = False
+
+    #: Which adapter can call this model. The request shape differs per provider, not only
+    #: per model, so the two facts have to travel together: a card naming an OpenAI-shaped
+    #: model reaching the Anthropic adapter is a 404 on an endpoint that does not exist.
+    provider: Provider = "anthropic"
+
+    #: Whether the provider *guarantees* the response matches the JSON schema, as opposed to
+    #: merely promising valid JSON.
+    #:
+    #: The distinction is load-bearing and is why `supports_structured_outputs` is not enough
+    #: on its own. Constrained decoding cannot emit a non-conforming document. A JSON-object
+    #: mode can, and often does — a missing required field, an enum value invented, a number
+    #: as a string. Both are usable here, because the drafting call already retries a draft it
+    #: cannot parse, but only one of them makes that retry rare. A card claiming constraint it
+    #: does not have turns a routine repair into an unexplained drafting failure rate.
+    constrained_json_schema: bool = True
 
     def room_for_output(self, prompt_tokens: int) -> int:
         """Output tokens that still fit alongside a prompt this size.
@@ -149,6 +170,53 @@ CARDS: dict[str, ModelCard] = {
         id="claude-fable-5",
         context_window=1_000_000,
         max_output_tokens=64_000,
+    ),
+    # ---------------------------------------------------------------- OpenAI-compatible
+    #
+    # Two entries, not a catalogue. This project runs one model as a cost decision, and these
+    # exist so that someone holding an OpenAI key can run it at all -- which was impossible
+    # before, and is the single largest barrier to anyone adopting this.
+    #
+    # A model reached through a proxy is deliberately *not* listed. There are hundreds, their
+    # capabilities differ, and guessing from a name is exactly what `models.py` refuses to do:
+    # pass `OpenAICompatLLM(card=...)` and declare it. Being told is not the same as inferring.
+    "gpt-5.2": ModelCard(
+        id="gpt-5.2",
+        context_window=400_000,
+        max_output_tokens=128_000,
+        provider="openai_compat",
+        # `output_config.effort` is Anthropic's knob and does not exist here; this provider's
+        # reasoning control is a different parameter, and sending the wrong one is a 400.
+        supports_effort=False,
+        # Sampling parameters are accepted, unlike the current Anthropic frontier -- but nothing
+        # here sends them, so this records the fact rather than acting on it.
+        supports_sampling_params=True,
+        # False, and measured rather than assumed. `response_format.json_schema` with
+        # `strict: true` is a real guarantee -- but strict mode requires every property of every
+        # object to be listed in `required`, and Cortex's report schema has nine objects with
+        # optional fields (`confidence`, `charts`, `cause_at`, ...). Sending it strict is a 400
+        # at the drafting call. So this asks for JSON-object mode, and the existing repair
+        # attempt carries the occasional non-conforming draft. Flipping this to True needs the
+        # schema made total first, which changes what a drafted report may omit.
+        constrained_json_schema=False,
+        # Caching is automatic on this provider rather than requested per block, so there is no
+        # `cache_control` to send. The usage figures still report the cached share.
+        supports_prompt_cache=False,
+        permitted=True,
+    ),
+    # Declared, not permitted. The cheaper tier is the obvious candidate for the default --
+    # `DEFAULT_EFFORT` was chosen the same way, and less turned out to be better on every
+    # dimension the suite measures -- but that was a measurement, and this has not been
+    # measured. Permitting it is one flag away from an eval run that says so.
+    "gpt-5.2-mini": ModelCard(
+        id="gpt-5.2-mini",
+        context_window=400_000,
+        max_output_tokens=128_000,
+        provider="openai_compat",
+        supports_effort=False,
+        supports_sampling_params=True,
+        constrained_json_schema=False,
+        supports_prompt_cache=False,
     ),
 }
 

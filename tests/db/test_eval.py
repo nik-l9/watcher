@@ -1568,7 +1568,13 @@ class TestTheScenarioThatFailsIfADisclosureStops:
         rather than merely the more comfortable of two guesses.
         """
         scenario = by_name("measurement_stopped")
-        payload = dict(scenario.responses["posthog__event_trend"])
+        # Through the resolver: this series is derived from daily counts now, so there is no
+        # canned payload to read and asking for one would test the wrong thing.
+        payload = dict(
+            scenario.response_for(
+                "posthog__event_trend", {"event": "user signed up", "interval": "day"}
+            )
+        )
         request = {
             k: payload.get(k) for k in ("start_date", "end_date", "interval", "breakdown_property")
         }
@@ -1659,6 +1665,16 @@ class TestNoScenarioReportsAGapItDidNotPlant:
                 for raw in [row.get("bucket") or (row.get("dimensions") or {}).get("date")]
                 if isinstance(raw, str)
             ]
+            # Derived series count toward the horizon, and leaving them out is what dropped
+            # `measurement_stopped` from the 15th to the 3rd -- making GA4's truncated series
+            # look complete and deleting the only thing that scenario is about. This test is
+            # what caught it.
+            planted += [
+                day.isoformat()
+                for series in scenario.daily_truth.values()
+                for truth in series
+                for day, _ in truth.days
+            ]
             if planted:
                 assert scenario.as_of == date.fromisoformat(max(planted)), scenario.name
 
@@ -1743,7 +1759,7 @@ class TestAFixtureAnswersOnlyWhatItWasAsked:
 
     def test_a_different_event_returns_an_empty_series_not_another_one(self) -> None:
         scenario = by_name("partial_month_false_premise")
-        planted = scenario.daily_truth["posthog__event_trend"].event
+        planted = scenario.daily_truth["posthog__event_trend"][0].event
         asked = {"event": "signup_completed", "interval": "day"}
         decoy = scenario.response_for("posthog__event_trend", asked)
 
@@ -1783,11 +1799,18 @@ class TestAFixtureAnswersOnlyWhatItWasAsked:
         assert decoy["repo"] == "acme/nonexistent"
 
     def test_a_request_with_no_subject_is_unchanged(self) -> None:
-        """A capability whose params name no subject must not be filtered by accident."""
+        """A capability whose params name no subject must not be filtered by accident.
+
+        With several series planted, "no subject named" resolves to the first — the one the
+        scenario leads with. Answering empty instead would make a call that omits the event
+        look like a call about an event nobody planted, which are different observations.
+        """
         scenario = by_name("measurement_stopped")
-        planted = scenario.responses["posthog__event_trend"]
-        assert scenario.response_for("posthog__event_trend", {}) == planted
-        assert scenario.response_for("posthog__event_trend", None) == planted
+        leading = scenario.daily_truth["posthog__event_trend"][0].event
+        for params in ({}, None):
+            payload = scenario.response_for("posthog__event_trend", params)
+            assert payload["event"] == leading
+            assert payload["series"], params
 
 
 class TestAFixtureMustNotArgueAgainstItsOwnGroundTruth:
@@ -1931,3 +1954,137 @@ class TestEveryPlantedEventStaysAdvertised:
         assert "user signed up" in scenario.events_described()
         advertised = {e["name"] for e in scenario.response_for("posthog__list_events")["events"]}
         assert "user signed up" in advertised
+
+
+class TestTheCampaignScenarioAnswersTheIntervalAsked:
+    """The fifth-instance defect, fixed in one scenario and left in another.
+
+    `campaign_traffic_drop` planted four weekly buckets and handed them to a request for
+    `interval="day"`. It cost score twice in run 31: the sufficiency gate withheld the planted
+    cause and the verifier cut a claim, both objecting that no signups series established the
+    decline — and on the attempt that did retrieve the series, they were describing four weekly
+    points spanning the very boundary the question turns on.
+    """
+
+    SCENARIO = "campaign_traffic_drop"
+
+    def test_a_daily_request_gets_daily_buckets(self) -> None:
+        scenario = by_name(self.SCENARIO)
+        payload = scenario.response_for(
+            "posthog__event_trend",
+            {
+                "event": "user signed up",
+                "interval": "day",
+                "start_date": "2026-06-01",
+                "end_date": "2026-06-30",
+            },
+        )
+        assert payload["interval"] == "day"
+        assert payload["row_count"] == 30
+
+    def test_the_step_lands_where_the_campaign_ended(self) -> None:
+        """The campaign ended on 14 June, so the step belongs on the 15th. A series whose
+        movement sits anywhere else would let a correct answer be graded against wrong data."""
+        scenario = by_name(self.SCENARIO)
+        payload = scenario.response_for(
+            "posthog__event_trend", {"event": "user signed up", "interval": "day"}
+        )
+        before = [r["value"] for r in payload["series"] if r["bucket"][:10] <= "2026-06-14"]
+        after = [r["value"] for r in payload["series"] if r["bucket"][:10] >= "2026-06-15"]
+        rate_before = sum(before) / len(before)
+        rate_after = sum(after) / len(after)
+        assert rate_before > rate_after
+        # A fall of roughly 40%: large enough to find, small enough to need the daily view.
+        assert 0.35 < (rate_before - rate_after) / rate_before < 0.50
+
+    def test_a_weekly_call_still_sees_what_it_saw(self) -> None:
+        """The weekly totals are the fixture's own history — 402, 391, 236, 228 — and deriving
+        them from daily counts must not move them, or a scenario tuned against those numbers
+        would start measuring the change rather than the analyst."""
+        scenario = by_name(self.SCENARIO)
+        payload = scenario.response_for(
+            "posthog__event_trend",
+            {
+                "event": "user signed up",
+                "interval": "week",
+                "start_date": "2026-06-01",
+                "end_date": "2026-06-30",
+            },
+        )
+        weekly = {r["bucket"][:10]: r["value"] for r in payload["series"]}
+        for bucket, expected in (
+            ("2026-06-01", 402),
+            ("2026-06-08", 391),
+            ("2026-06-15", 236),
+            ("2026-06-22", 228),
+        ):
+            assert abs(weekly[bucket] - expected) < 20, (bucket, weekly[bucket])
+
+    def test_the_event_stays_advertised(self) -> None:
+        """The invariant every planting field has broken in turn."""
+        scenario = by_name(self.SCENARIO)
+        advertised = {e["name"] for e in scenario.response_for("posthog__list_events")["events"]}
+        assert scenario.events_described() <= advertised
+        assert "user signed up" in advertised
+
+
+class TestAPlainTrendSeriesMustBeDerived:
+    """The class, closed. Six times a fixture answered a question it was not asked.
+
+    Repository, date range, event name, subject, interval, and interval again — each found
+    separately, each fixed in the one scenario that exposed it. The interval one cost real score
+    twice, in `partial_month_false_premise` and then in `campaign_traffic_drop`, because fixing
+    it in the first did nothing for the second.
+
+    A canned payload cannot answer the interval it was asked for: it returns whatever buckets
+    were typed into it. So a plain trend series has to be planted as `daily_truth` and derived.
+    The exemption is a *segmented* series, which `DailyTruth` has no shape for — and that is
+    recorded here rather than left as an absence, so the next reader knows it was considered.
+    """
+
+    #: `onboarding_regression` plants a per-device breakdown, where each row carries a `segment`
+    #: alongside bucket and value. `DailyTruth` holds one series of `(day, count)` and cannot
+    #: express that. Its payload is already daily, so the defect this test guards is not
+    #: reachable there — a request for days gets days.
+    SEGMENTED = {"onboarding_regression"}
+
+    def test_no_scenario_plants_a_canned_plain_trend(self) -> None:
+        for scenario in SCENARIOS:
+            planted = scenario.responses.get("posthog__event_trend")
+            if planted is None or scenario.name in self.SEGMENTED:
+                continue
+            raise AssertionError(
+                f"{scenario.name} plants a canned posthog__event_trend payload. A canned series "
+                "answers whatever interval it was typed with, whatever the caller asked for. "
+                "Plant it as `daily_truth` instead, or add it to SEGMENTED with the reason."
+            )
+
+    def test_the_segmented_exemption_is_really_segmented(self) -> None:
+        """An exemption nobody checks becomes a place to hide things. If that payload ever stops
+        carrying segments, it has no reason to stay canned and this says so."""
+        for name in self.SEGMENTED:
+            series = by_name(name).responses["posthog__event_trend"]["series"]
+            assert all("segment" in row for row in series), name
+
+    def test_every_derived_series_answers_the_interval_asked(self) -> None:
+        """The property itself, across every scenario that has one, rather than per fixture."""
+        for scenario in SCENARIOS:
+            for truth in scenario.daily_truth.get("posthog__event_trend", ()):
+                for interval in ("day", "week", "month"):
+                    payload = scenario.response_for(
+                        "posthog__event_trend",
+                        {"event": truth.event, "interval": interval},
+                    )
+                    assert payload["interval"] == interval, (scenario.name, truth.event, interval)
+                    assert payload["series"], (scenario.name, truth.event, interval)
+
+    def test_a_derived_series_declares_the_total_it_actually_sums_to(self) -> None:
+        """`tempting_coincidence` declared `total: 9300` beside a series summing to 11,405 — an
+        18% contradiction handed to any analyst who read the field instead of adding the rows
+        up. Derivation computes it, so the two cannot disagree."""
+        for scenario in SCENARIOS:
+            for truth in scenario.daily_truth.get("posthog__event_trend", ()):
+                payload = scenario.response_for(
+                    "posthog__event_trend", {"event": truth.event, "interval": "day"}
+                )
+                assert payload["total"] == sum(r["value"] for r in payload["series"])

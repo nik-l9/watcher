@@ -28,6 +28,21 @@ class LLMError(Exception):
     """Provider failure. Never carries an API key."""
 
 
+class LLMAuthenticationFailed(LLMError):
+    """The credential is wrong, absent, or not entitled to this model.
+
+    Split from a plain `LLMError` because the loop's recovery is right for one and wrong for the
+    other. A transient failure with evidence already gathered should stop and report what was
+    found -- discarding real work over a blip is worse than a partial answer. A rejected
+    credential will reject every later call too, so the same policy spends the step budget
+    reaching the same place and then surfaces "the report could not be drafted", which sends
+    whoever reads it to look at the schema instead of at their key.
+
+    Observed exactly that way: a dead key produced a 17-second investigation whose reported
+    cause was drafting.
+    """
+
+
 class LLMRefusedStructure(LLMError):
     """The model would not produce output matching the requested schema."""
 

@@ -50,6 +50,18 @@ class Settings(BaseSettings):
         default=None, validation_alias="ANTHROPIC_API_KEY", repr=False
     )
 
+    # The OpenAI-compatible provider, which is several providers: OpenAI itself, OpenRouter,
+    # Groq, Together, vLLM, Ollama. Unset base URL means OpenAI's own endpoint, so someone with
+    # only `OPENAI_API_KEY` needs no further configuration -- and someone pointing at a proxy
+    # sets the URL and uses that proxy's key in the same variable, which is what every one of
+    # those services documents.
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY", repr=False)
+    # Not a secret in itself, but a proxy base can carry a token in its path, so it is kept out
+    # of reprs alongside the key rather than being treated as ordinary configuration.
+    openai_base_url: str | None = Field(
+        default=None, validation_alias="OPENAI_BASE_URL", repr=False
+    )
+
     # Clerk. Absent in development, required before authenticated traffic is served: the
     # gateway refuses to start serving outside local/test without a JWKS url, so a
     # misconfigured deployment fails visibly instead of trusting headers.

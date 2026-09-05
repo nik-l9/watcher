@@ -384,6 +384,7 @@ class TestStatingTheAssumptionRatherThanAsking:
         assert "in the risks" in guidance
 
     def test_it_reaches_the_live_prompt_only_when_it_applies(self) -> None:
+
         from cortex.agents.investigator import _drafting_instruction
 
         needle = "without saying what to measure it against"
@@ -415,3 +416,48 @@ class TestACausalReportMustNameTheChange:
         """Nothing to name: a factual question is not attributing a movement to a change, and
         an instruction about identifying causes would be noise in that shape's guidance."""
         assert "Name the change, not its category" not in GUIDANCE[Shape.FACTUAL]
+
+
+class TestTheCompoundClaimRule:
+    """A sentence relating two observations has to cite both, and losing these costs the answer.
+
+    Each claim is verified against only the ids it carries. The drafter kept citing the one
+    observation a sentence appears to be *about*: "the campaign ended on 14 June, one day before
+    the drop began", citing the Slack message alone. The verifier removes it correctly — when the
+    drop began is not in that message — and the delivered summary is left describing a 68.4%
+    collapse in paid search with nothing about the exhausted budget behind it.
+
+    Measured twice on `campaign_traffic_drop` in run 32, and invisible to `accuracy`, which
+    searches the whole report and finds the cause surviving in a finding.
+    """
+
+    def test_the_rule_reaches_the_drafter(self) -> None:
+        import uuid
+
+        from cortex.agents.investigator import _drafting_instruction
+
+        text = _drafting_instruction("Why did signups fall?", [uuid.uuid4()], "confident")
+        assert "relates two observations must cite both" in text
+
+    def test_it_names_the_relationships_that_need_two_ids(self) -> None:
+        """Before/after/during/because, and comparisons. Naming the shapes rather than stating
+        the principle alone, because the principle was already there — "the observations that
+        establish it" — and the drafter still cited one."""
+        import uuid
+
+        from cortex.agents.investigator import _drafting_instruction
+
+        text = _drafting_instruction("Why did signups fall?", [uuid.uuid4()], "confident")
+        for relationship in ("before", "after", "during", "because"):
+            assert relationship in text
+        assert "comparing two figures" in text
+
+    def test_it_offers_the_narrower_claim_as_the_way_out(self) -> None:
+        """Without somewhere to go, the instruction is a rule the drafter can only break. A
+        claim split into the half it can establish survives; the fuller one does not."""
+        import uuid
+
+        from cortex.agents.investigator import _drafting_instruction
+
+        text = _drafting_instruction("Why did signups fall?", [uuid.uuid4()], "confident")
+        assert "state only the half you can establish" in text.lower()
