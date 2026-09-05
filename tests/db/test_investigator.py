@@ -46,6 +46,7 @@ from cortex.reports.schema import (
     Finding,
     Hypothesis,
     InvestigationReport,
+    PremiseVerdict,
     Verdict,
 )
 from cortex.tenancy.context import TenantContext
@@ -1598,3 +1599,74 @@ class TestASparseRefutationIsNotAStub:
             confidence=Confidence.MEDIUM,
         )
         assert not _is_degenerate(report, evidence)
+
+
+class TestTheDegeneracyExemptionIsNotReachableByAStub:
+    """The exemption was satisfied by exactly the stubs it exists to catch.
+
+    It asked only that `premise` be set and `premise_checked` be non-empty. Both are filled by
+    habit rather than by work: `llm_report_schema()` emits them at indices 1 and 2 — *before*
+    findings — and `_PREMISE_CHECK` instructs every report to set them. So a draft that collapsed
+    on findings had already filled both, and `premise=holds, premise_checked="."` was exempt.
+
+    The shipped test only probed whitespace, so one non-space character passed.
+    """
+
+    STUBS = (
+        (PremiseVerdict.HOLDS, "placeholder"),
+        (PremiseVerdict.HOLDS, "."),
+        (PremiseVerdict.UNVERIFIABLE, "n/a"),
+        (PremiseVerdict.HOLDS, "The question asserts that signups fell in June."),
+        (PremiseVerdict.FALSE, "The premise does not hold on inspection here."),
+        (PremiseVerdict.NONE_ASSERTED, ""),
+    )
+
+    @pytest.mark.parametrize(("premise", "checked"), STUBS)
+    def test_a_stub_is_caught(self, premise: PremiseVerdict, checked: str) -> None:
+        from cortex.agents.investigator import _is_degenerate
+
+        evidence = [uuid.uuid4()]
+        report = InvestigationReport(
+            question="Why did signups fall?",
+            executive_summary=[Claim(text="Placeholder text.", evidence_ids=evidence)],
+            premise=premise,
+            premise_checked=checked,
+            confidence=Confidence.LOW,
+        )
+        assert _is_degenerate(report, evidence)
+
+    def test_a_real_refutation_is_still_exempt(self) -> None:
+        """The case the exemption exists for, and the shape every real one has: it cites what it
+        measured."""
+        from cortex.agents.investigator import _is_degenerate
+
+        evidence = [uuid.uuid4()]
+        report = InvestigationReport(
+            question="Did our signups fall from last month?",
+            executive_summary=[Claim(text="No — signups did not fall.", evidence_ids=evidence)],
+            premise=PremiseVerdict.FALSE,
+            premise_checked=(
+                "August is 12 days old: 157.0 signups/day against 156.4/day across all of July."
+            ),
+            confidence=Confidence.HIGH,
+        )
+        assert not _is_degenerate(report, evidence)
+
+    def test_a_holding_premise_never_exempts(self) -> None:
+        """If the premise holds, the movement really happened, and a report saying nothing about
+        it is a stub whatever it wrote in the check. `holds` is also what a collapsing draft
+        defaults to, having decided nothing."""
+        from cortex.agents.investigator import _is_degenerate
+
+        evidence = [uuid.uuid4()]
+        report = InvestigationReport(
+            question="Why did signups fall?",
+            executive_summary=[Claim(text="Signups fell 18%.", evidence_ids=evidence)],
+            premise=PremiseVerdict.HOLDS,
+            premise_checked=(
+                "Signups fell from 4,849 in July to 1,884 in August, a drop of 61.1% confirmed "
+                "against the PostHog series."
+            ),
+            confidence=Confidence.MEDIUM,
+        )
+        assert _is_degenerate(report, evidence)

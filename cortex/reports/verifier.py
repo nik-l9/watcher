@@ -214,9 +214,38 @@ _DECLINES_A_CAUSE = (
 #: so it is the one pattern here expressed as a regex. Kept narrow deliberately: the negation has
 #: to be within a few words of the marker, because a sentence that says "no" early and asserts a
 #: cause later is an assertion, and widening the window would start excusing those.
+#: Idioms where a negation *strengthens* an assertion instead of eliminating one. Each was a
+#: real leak: "there is no doubt the campaign ending caused the fall" reads as an elimination to
+#: any pattern that only looks for a negation near a causal verb, and it is the opposite.
+_ASSERTING_NEGATIONS = (
+    "no doubt",
+    "no question",
+    "no denying",
+    "no fewer",
+    "none other",
+    "no one disputes",
+    "nobody disputes",
+    "no one denies",
+)
+
+#: A negated subject immediately governing a causal verb: "no code change explains a session
+#: change", "nothing in the diff caused the drop".
+#:
+#: **Deliberately narrow, and the direction of the error is the reason.** A false negative here
+#: disables four separate defences for that sentence -- the sufficiency gate makes no call at
+#: all, the fresh-context re-derivation is skipped, data-trust enforcement returns early, and
+#: nothing enters the withheld set -- so an unsupported causal claim reaches a reader unchecked.
+#: A false positive merely withholds an elimination, which is a worse report and not a wrong one.
+#:
+#: The first version of this spanned any negation within 40 characters of a causal verb and
+#: excised the whole match, verb included. That deleted the assertion rather than the
+#: elimination: "neither team noticed, but PR 913 caused the drop" scanned as non-causal. So the
+#: span may not cross a clause boundary -- a comma was all it took -- and the idioms above are
+#: excluded outright.
 _NEGATED_CAUSE = re.compile(
-    r"\b(?:no|nothing|neither|none)\b[^.;]{0,40}?"
-    r"\b(?:explains?|explained|caused?|causes|drove|drives|triggered|triggers|led to)\b"
+    r"\b(?:no|nothing|neither|none)\b[^.;,]{0,40}?"
+    r"\b(?:explains?|explained|caused?|causes|drove|drives|triggered|triggers|led to|"
+    r"responsible for|attributable to|due to|driven by|stems from|the reason)\b"
 )
 
 
@@ -248,10 +277,23 @@ def is_causal_claim(text: str) -> bool:
     the disagreement would only be visible by reading both prompts.
     """
     lowered = text.lower()
-    if any(marker in lowered for marker in _DECLINES_A_CAUSE):
-        return False
     if any(idiom in lowered for idiom in _DESCRIPTIVE_IDIOMS):
         return False
+    # Eliminations are excised, then the question is asked of what remains -- on *both* paths.
+    # The phrase list short-circuited while the regex excised, so "deploys were ruled out, but
+    # the campaign ending caused the majority of the fall" scanned as non-causal on the strength
+    # of its first clause. Two mechanisms doing the same job by different rules is how they
+    # disagree silently.
+    #
+    # The negated-cause pass runs *first*, and the order is load-bearing: several entries in
+    # `_DECLINES_A_CAUSE` are themselves negations ("no evidence", "no cause"), so excising them
+    # first destroys the negation the pattern needs and leaves the bare verb behind. "There is
+    # no evidence that the deploy caused the fall" then scanned as an assertion.
+    remainder = lowered
+    if not any(idiom in lowered for idiom in _ASSERTING_NEGATIONS):
+        remainder = _NEGATED_CAUSE.sub(_excise_if_one_clause, remainder)
+    for marker in _DECLINES_A_CAUSE:
+        remainder = remainder.replace(marker, " ")
     # Eliminations are excised, not short-circuited on, and the difference matters. Ruling a
     # candidate out *is* the analysis -- it is what Kepner-Tregoe's IS/IS-NOT step produces and
     # what makes a remaining cause worth believing -- so a gate that removes eliminations
@@ -262,8 +304,41 @@ def is_causal_claim(text: str) -> bool:
     # cause in its second clause. So each elimination is cut out and the question is asked of
     # what remains. The first version short-circuited and let that sentence through, which is
     # the dangerous direction for a gate whose job is catching unsupported assertions.
-    remainder = _NEGATED_CAUSE.sub(" ", lowered)
     return any(marker in remainder for marker in _CAUSAL_MARKERS)
+
+
+#: Words that open a new clause. A negation on one side of these does not govern a causal verb on
+#: the other: "there was no warning **before** the deploy caused the outage" asserts the cause,
+#: and only the subordinator separates it from "no deploy caused the outage", which denies one.
+#: Commas are already excluded by the pattern; these are the ones that need no punctuation.
+_CLAUSE_BREAKS = (
+    " before ",
+    " after ",
+    " while ",
+    " since ",
+    " when ",
+    " because ",
+    " so ",
+    " but ",
+    " and ",
+    " though ",
+    " although ",
+    " until ",
+    " whereas ",
+)
+
+
+def _excise_if_one_clause(match: re.Match[str]) -> str:
+    """Remove a negated cause only where the negation and the verb share a clause.
+
+    Called as the replacement for every `_NEGATED_CAUSE` match, so the decision is made per
+    match rather than per sentence: one elimination in a sentence does not excuse a separate
+    assertion elsewhere in it, and one assertion does not preserve a separate elimination.
+    """
+    span = match.group(0)
+    if any(break_word in span for break_word in _CLAUSE_BREAKS):
+        return span
+    return " "
 
 
 def causal_claims(report: InvestigationReport) -> list[tuple[str, Claim]]:

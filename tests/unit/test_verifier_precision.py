@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from cortex.eval.fixtures import alternatives_of, by_name
 from cortex.eval.scorer import Scorer
 from cortex.reports.schema import Claim, Confidence, InvestigationReport
@@ -236,3 +238,73 @@ class TestItScoresWhatTheSummaryLostNotWhatWasRemoved:
         )
         assert scored.score == 1.0
         assert "none carrying the planted cause" in scored.detail
+
+
+class TestTheExonerationTestIsNeitherTooLooseNorTooStrict:
+    """Both directions were wrong today, in sequence, and the second was worse.
+
+    First it asked whether the signal appeared anywhere in the summary, which exonerated the
+    run-32 defect verbatim, a summary that *denied* the cause, and `"ends"` matching inside
+    `"trends"`.
+
+    Then it also required the claim to be causal — and rejected the right answer. On
+    `measurement_stopped` the correct summary is "the GA4 sessions data simply stops being
+    recorded after August 3": a statement of fact about a data incident, carrying no causal
+    marker. That reading scored the dimension down on every attempt of that scenario and on two
+    of `campaign_traffic_drop`, which sent me chasing a defect that was not there.
+
+    So: word boundaries, and a claim that does not deny the signal. No causality requirement.
+    """
+
+    DENIALS_AND_NOISE = (
+        ("campaign_traffic_drop", "The campaign was NOT the cause; the drop remains unexplained."),
+        ("measurement_stopped", "Weekly signup trends were reviewed and nothing emerged."),
+        ("measurement_stopped", "Recommendations depend on which team owns the tag."),
+    )
+
+    @pytest.mark.parametrize(("scenario", "summary"), DENIALS_AND_NOISE)
+    def test_a_denial_or_a_substring_does_not_exonerate(self, scenario: str, summary: str) -> None:
+        from cortex.eval.scorer import _still_asserted_in_summary
+
+        report = InvestigationReport(
+            question="q",
+            executive_summary=[Claim(text=summary, evidence_ids=[uuid.uuid4()])],
+            confidence=Confidence.LOW,
+        )
+        requirement = by_name(scenario).ground_truth.required_signals[0]
+        assert not _still_asserted_in_summary(report, requirement)
+
+    REAL_ANSWERS = (
+        (
+            "measurement_stopped",
+            "Sessions did not collapse in August - the GA4 sessions data simply stops being "
+            "recorded after August 3, 2026.",
+        ),
+        (
+            "measurement_stopped",
+            "Site sessions did not collapse in August: the GA4 sessions data feed itself "
+            "stopped reporting after 2026-08-03.",
+        ),
+        (
+            "campaign_traffic_drop",
+            "A Slack message from 2026-06-14 announcing the spring campaign budget was "
+            "exhausted and ads were being paused that day lines up with the drop.",
+        ),
+    )
+
+    @pytest.mark.parametrize(("scenario", "summary"), REAL_ANSWERS)
+    def test_a_correct_answer_exonerates_even_without_a_causal_marker(
+        self, scenario: str, summary: str
+    ) -> None:
+        """Taken verbatim from run 34's delivered reports. A dimension that complains about
+        these is worse than one that is slightly loose: it does not gate, so its only effect is
+        to send a reader after a defect that is not there."""
+        from cortex.eval.scorer import _still_asserted_in_summary
+
+        report = InvestigationReport(
+            question="q",
+            executive_summary=[Claim(text=summary, evidence_ids=[uuid.uuid4()])],
+            confidence=Confidence.LOW,
+        )
+        requirement = by_name(scenario).ground_truth.required_signals[0]
+        assert _still_asserted_in_summary(report, requirement)

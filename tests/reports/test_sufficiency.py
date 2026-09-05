@@ -424,7 +424,25 @@ class TestAnEliminationIsNotAnAssertion:
     def test_ruling_out_is_not_asserting(self) -> None:
         assert not is_causal_claim(
             "Code changes were limited to a CI runner pin and a dependency bump, ruling out a "
-            "deploy-caused funnel regression."
+            "deploy regression."
+        )
+
+    def test_an_elimination_naming_a_causal_word_is_over_caught_on_purpose(self) -> None:
+        """The known cost of the direction this predicate errs in, recorded rather than hidden.
+
+        "ruling out a deploy-**caused** funnel regression" still reads as causal: the marker is
+        inside a hyphenated adjective and no substring test can tell that from an assertion. So
+        the sufficiency gate may withhold this sentence.
+
+        That is the acceptable failure. A false negative here disables four defences at once —
+        the gate makes no call, the fresh-context re-derivation is skipped, data-trust
+        enforcement returns early, and nothing enters the withheld set — so an unsupported
+        causal claim reaches a reader unchecked. A false positive costs one elimination in one
+        report. The first version of this fix chose the other direction and leaked eight
+        assertions.
+        """
+        assert is_causal_claim(
+            "Code changes were limited to a CI runner pin, ruling out a deploy-caused regression."
         )
 
     def test_a_negated_subject_is_not_asserting(self) -> None:
@@ -461,4 +479,97 @@ class TestAnEliminationIsNotAnAssertion:
         assert is_causal_claim(
             "No dashboards were available to the team at the time, and after a week of manual "
             "checks the eventual finding was that the onboarding modal caused the drop."
+        )
+
+
+class TestTheTwoJudgesAreOrderedOppositely:
+    """The verifier reasons before deciding; this gate decides before listing. Both are right.
+
+    Structured output generates fields in order, so whichever comes first anchors the rest. The
+    two judges can fail in opposite directions, which is why they are ordered opposite ways:
+
+    - The verifier judges *quality*, where deciding first means writing a justification for what
+      you already said. So `reason` precedes `verdict`.
+    - This gate judges *sufficiency*, where naming what is missing is easy and always possible —
+      more evidence can always be wished for. A `missing`-first order leaves a list the model
+      must then agree with, and the agreeing answer is "insufficient". That is over-abstention,
+      and a suite whose hard bar is a hallucination count of zero cannot see it.
+
+    Asserted together so that a future reader flipping one for consistency has to read why they
+    differ, rather than discovering it from an eval run.
+    """
+
+    def test_the_sufficiency_gate_decides_before_it_lists(self) -> None:
+        from cortex.reports.sufficiency import SUFFICIENCY_SCHEMA
+
+        order = list(SUFFICIENCY_SCHEMA["properties"])
+        assert order.index("sufficient") < order.index("missing")
+
+    def test_the_verifier_reasons_before_it_decides(self) -> None:
+        from cortex.reports.verifier import VERDICT_SCHEMA
+
+        order = list(VERDICT_SCHEMA["properties"])
+        assert order.index("reason") < order.index("verdict")
+
+    def test_the_gate_still_has_somewhere_to_reason(self) -> None:
+        """arXiv 2605.23970 §8: a rigid format with no room to reason destroys the gate — one
+        ablation committed on 48 of 48 unknowable items. `reason` is required here, so that
+        failure mode does not apply and is not the argument for changing the order."""
+        from cortex.reports.sufficiency import SUFFICIENCY_SCHEMA
+
+        assert "reason" in SUFFICIENCY_SCHEMA["required"]
+
+
+class TestANegationElsewhereDoesNotExcuseAnAssertion:
+    """Eight real causal assertions scanned as non-causal after the first version of this fix.
+
+    The pattern spanned any negation within forty characters of a causal verb and excised the
+    whole match, verb included — so it deleted the *assertion* rather than the elimination.
+    "Neither team noticed, but PR 913 caused the drop" is structurally the sentence the fix's own
+    test protects; it just leads with a negation belonging to another clause.
+
+    The consequence was the reason to treat it as urgent: `is_causal_claim` gates the sufficiency
+    gate, the fresh-context re-derivation, data-trust enforcement and the withheld set, so a
+    false negative turns off all four for that sentence.
+    """
+
+    ASSERTIONS = (
+        "Neither team noticed, but PR 913 caused the drop.",
+        "There is no doubt the campaign ending caused the fall.",
+        "No one disputes that the pricing change caused the churn.",
+        "There was no warning before the deploy caused the outage.",
+        "None other than the June deploy caused the mobile collapse.",
+        "With no prior notice, the vendor outage caused the signup drop.",
+        "No fewer than three deploys caused the regression.",
+        "No dashboards existed, so the modal caused the drop.",
+        "Deploys were ruled out, but the campaign ending caused the majority of the fall.",
+        "There is no evidence of a deploy; the campaign ending caused the drop.",
+        "The drop is unrelated to mobile, and was caused by the campaign budget running out.",
+    )
+
+    @pytest.mark.parametrize("text", ASSERTIONS)
+    def test_it_is_still_a_causal_claim(self, text: str) -> None:
+        assert is_causal_claim(text), text
+
+    ELIMINATIONS = (
+        "No commits were found, so no code change on the web front-end explains a session change.",
+        "Nothing in the diff caused the drop.",
+        "No deploy is responsible for the drop.",
+        "None of these is the reason for the fall.",
+        "There is no evidence that the deploy caused the fall.",
+    )
+
+    @pytest.mark.parametrize("text", ELIMINATIONS)
+    def test_a_genuine_elimination_is_still_excused(self, text: str) -> None:
+        """Both directions, in one class. Fixing the leak must not simply restore the behaviour
+        that withheld the analyst's ruling-out work."""
+        assert not is_causal_claim(text), text
+
+    def test_the_phrase_list_no_longer_short_circuits(self) -> None:
+        """The excise-don't-short-circuit fix was applied only to the pattern; the thirty-entry
+        phrase list still returned False on the whole sentence — and the same commit added two
+        entries to it, widening the hole it claimed to close."""
+        assert is_causal_claim(
+            "Code changes were limited to a dependency bump, ruling out a deploy regression, "
+            "and the campaign ending caused the fall."
         )
