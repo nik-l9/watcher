@@ -399,3 +399,66 @@ class TestTheBarIsDerivableNotProven:
     def test_it_still_forbids_reconstructing_the_conclusion(self) -> None:
         """The property that makes this a second reading rather than a review of the answer."""
         assert "must not try to reconstruct one" in SUFFICIENCY_PROMPT
+
+
+class TestAnEliminationIsNotAnAssertion:
+    """The gate was withholding the analyst's ruling-out work.
+
+    Found by reading five sufficiency rejections together, across two providers. Every withheld
+    claim carried the same verdict string, and several of them asserted no cause at all:
+
+      - "no code change on the web front-end explains a session change"
+      - "limited to a CI runner pin and a dependency bump, ruling out a deploy-caused regression"
+
+    Both are eliminations backed by the diff they name. `_DECLINES_A_CAUSE` already held "rules
+    out" and "ruled out" and simply lacked the gerund, and nothing at all matched a negated
+    subject before the verb.
+
+    Why it matters more than a scoring detail: ruling a candidate out *is* the analysis. It is
+    what Kepner-Tregoe's IS/IS-NOT step produces and what makes a surviving cause worth
+    believing. A gate that removes eliminations deletes the reasoning and keeps the conclusion,
+    which is the opposite of its purpose — and on `measurement_stopped` it removed every summary
+    claim and refused the whole report, which was correct and corroborated.
+    """
+
+    def test_ruling_out_is_not_asserting(self) -> None:
+        assert not is_causal_claim(
+            "Code changes were limited to a CI runner pin and a dependency bump, ruling out a "
+            "deploy-caused funnel regression."
+        )
+
+    def test_a_negated_subject_is_not_asserting(self) -> None:
+        """The noun between the negation and the verb is arbitrary, so no phrase list can catch
+        this. It is the one pattern here expressed as a regex."""
+        assert not is_causal_claim(
+            "No commits were found since 2026-07-15, so no code change on the web front-end "
+            "explains a session change."
+        )
+        assert not is_causal_claim("Nothing in the diff caused the drop.")
+
+    def test_asserting_a_cause_still_counts(self) -> None:
+        """The fix must not blunt the gate on what it exists for."""
+        assert is_causal_claim(
+            "The mobile signup drop was caused by PR #913, which reworked the onboarding modal."
+        )
+        assert is_causal_claim("The drop was driven by the paid campaign ending on 14 June.")
+
+    def test_an_elimination_does_not_excuse_the_rest_of_the_sentence(self) -> None:
+        """The hole the first version of this fix shipped with, caught before it landed.
+
+        Returning False on any sentence *containing* an elimination blinds the gate to a
+        compound one. So the elimination is cut out and the question asked of what remains,
+        rather than short-circuited on — a gate that stops reading at the first "no" is worse
+        than one that is slightly over-strict.
+        """
+        assert is_causal_claim(
+            "No single deploy explains it, but the campaign ending caused the majority of the fall."
+        )
+
+    def test_a_negation_far_from_the_verb_does_not_excuse_it(self) -> None:
+        """The window is narrow on purpose: a sentence that says "no" early and asserts a cause
+        much later is an assertion, and widening it would start excusing those."""
+        assert is_causal_claim(
+            "No dashboards were available to the team at the time, and after a week of manual "
+            "checks the eventual finding was that the onboarding modal caused the drop."
+        )

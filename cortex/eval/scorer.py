@@ -931,23 +931,47 @@ class Scorer:
             return Dimension(
                 name="verifier_precision", score=1.0, detail="the verifier removed nothing"
             )
-        protected = [
-            describe_requirement(requirement)
+        # **Scored on what the summary lost, not on what was removed.** A removal can be
+        # entirely correct and still cost the answer: in run 32 the verifier cut four
+        # over-claiming sentences on `campaign_traffic_drop` -- each genuinely unsupported by
+        # its own citation -- and the delivered summary was left describing a 68.4% collapse in
+        # paid search without naming the exhausted campaign budget that caused it. The reader
+        # gets the mechanism and not the thing to act on.
+        #
+        # Matching on the removed text alone conflated that with the opposite case, a bad claim
+        # that merely mentioned the cause, and I read it wrong twice before checking the
+        # summaries. `accuracy` cannot see it either: it searches the whole report, so a cause
+        # surviving in a finding scores 1.00 while the summary no longer carries it.
+        surviving = " ".join(claim.text for claim in verification.report.executive_summary).lower()
+        cut = [
+            requirement
             for requirement in truth.required_signals
             if any(alt.lower() in text for text in removed for alt in alternatives_of(requirement))
         ]
+        protected = [
+            describe_requirement(requirement)
+            for requirement in cut
+            if not any(alt.lower() in surviving for alt in alternatives_of(requirement))
+        ]
         if not protected:
+            # Two different clean outcomes, reported differently: nothing bearing the cause was
+            # touched, or something was and the summary still carries it. A single message for
+            # both would hide which, and they call for different attention.
             return Dimension(
                 name="verifier_precision",
                 score=1.0,
-                detail=f"{len(removed)} claim(s) removed, none carrying the planted cause",
+                detail=(
+                    f"{len(removed)} claim(s) removed, the summary still names the planted cause"
+                    if cut
+                    else f"{len(removed)} claim(s) removed, none carrying the planted cause"
+                ),
             )
         return Dimension(
             name="verifier_precision",
             score=round(1.0 - len(protected) / len(truth.required_signals), 4),
             detail=(
-                f"the verifier removed the planted cause: {', '.join(protected)} appeared in a "
-                "claim it judged unsupported"
+                f"the summary lost the planted cause: {', '.join(protected)} was in a claim the "
+                "verifier judged unsupported and appears nowhere in the delivered summary"
             ),
         )
 

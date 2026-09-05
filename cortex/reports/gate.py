@@ -174,8 +174,15 @@ class GroundingGate:
             charts = charts_from_evidence(
                 [row for row_id, row in evidence_by_id.items() if row_id in valid]
             )
+        # Pruned as well as filtered, which every other field already did and this one did not.
+        # `_survives` answers "keep or drop" and leaves the element's citations untouched, so a
+        # recommendation citing one good id and one invented one was kept **carrying the invented
+        # one** -- and a recommendation is the part of a report a reader acts on. Observed in a
+        # real run: `grounding` reported 1 of 14 citations unresolvable and named an id living in
+        # `recommendations[2].evidence_ids[0]`, which the gate had already rejected and then
+        # shipped anyway.
         recommendations = [
-            r
+            r.model_copy(update={"evidence_ids": [e for e in r.evidence_ids if e in valid]})
             for r in report.recommendations
             if self._survives(
                 set(r.evidence_ids), valid, f"recommendation[{r.action[:60]}]", r.action, rejections
@@ -225,6 +232,21 @@ class GroundingGate:
                 "confidence": self._adjust_confidence(report.confidence, rejections),
             }
         )
+        # **The gate's own post-condition, checked rather than trusted.** Its docstring promises
+        # to strip every unresolvable citation, and for one field it silently did not: five
+        # places prune, `recommendations` only decided keep-or-drop, and nothing noticed until a
+        # fabricated id reached a delivered report and failed `grounding` two layers later.
+        #
+        # A per-field review fixes today's instance. This fixes the class: any field added later
+        # that forgets to prune fails here, loudly, at the gate that promised otherwise -- rather
+        # than as an unresolvable citation in something a reader has already been handed.
+        leaked = gated.cited_evidence_ids() - valid
+        if leaked:
+            raise ReportRejected(
+                "the citation gate did not strip every unresolvable citation: "
+                f"{', '.join(str(i) for i in sorted(leaked, key=str))}. This is a defect in the "
+                "gate rather than in the report -- some field is filtered without being pruned."
+            )
         return GateResult(report=gated, rejections=rejections)
 
     # ------------------------------------------------------------------ internals

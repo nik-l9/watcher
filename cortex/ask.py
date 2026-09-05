@@ -35,6 +35,7 @@ from cortex.agents.anthropic_llm import DEFAULT_EFFORT, DEFAULT_MODEL, Anthropic
 from cortex.agents.employee import gtm_data_analyst
 from cortex.agents.investigator import InvestigationFailed, Investigator
 from cortex.agents.progress import Phase, ProgressEvent, TerminalProgress, emit
+from cortex.agents.provider import build_llm
 from cortex.agents.service import confidence_score, record_usage
 from cortex.agents.timing import GATE, VERIFY
 from cortex.db.models import Investigation as InvestigationRow
@@ -323,7 +324,7 @@ async def _main(argv: list[str] | None = None) -> int:
         # far from the data will be answered honestly with what the data can support.
         scenario = dataclasses.replace(scenario, question=args.question)
 
-    llm = AnthropicLLM(model=args.model, effort=args.effort)
+    llm = build_llm(model=args.model, effort=args.effort)
     registry = scenario_registry(scenario)
     investigator = Investigator(
         llm=llm,
@@ -470,7 +471,7 @@ async def _ask_real(args: argparse.Namespace) -> int:
 
     from cortex.tools.registry import NoToolsAvailable, registry_for_tenant
 
-    llm = AnthropicLLM(model=args.model, effort=args.effort)
+    llm = build_llm(model=args.model, effort=args.effort)
 
     print(f"Investigating REAL data for tenant {args.tenant}: {args.question}", file=sys.stderr)
     print("Read-only: no write capability exists in the tool registry.", file=sys.stderr)

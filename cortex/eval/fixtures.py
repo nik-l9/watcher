@@ -249,7 +249,12 @@ class Scenario:
     #: A canned payload answers `interval="day"` with whatever buckets it was typed with, so a
     #: scenario whose trap is a monthly series answered the daily call -- the discriminating one
     #: -- with monthly data. See `DailyTruth`.
-    daily_truth: dict[str, DailyTruth] = field(default_factory=dict)
+    #:
+    #: A tuple rather than one series per capability, because a scenario often needs several:
+    #: `measurement_stopped` asserts the site is fine and only its measurement stopped, which
+    #: takes a healthy second event to say. One series per capability would have forced that
+    #: scenario to stay canned and kept the defect alive in the one place it matters most.
+    daily_truth: dict[str, tuple[DailyTruth, ...]] = field(default_factory=dict)
 
     #: Responses that differ by *subject* — which event, which repository — keyed by
     #: `tool__capability` then by the subject value.
@@ -302,8 +307,20 @@ class Scenario:
         `measurement_stopped` has GA4 stopping on 3 August while PostHog runs to the 15th, so
         its world demonstrably has data through the 15th and GA4's stop is a real twelve-day gap.
         A per-series horizon would clamp the gap away and delete the scenario's whole subject.
+
+        **`daily_truth` counts too, and forgetting it deleted that scenario once.** Moving the
+        PostHog series out of `responses` and into derived form dropped this horizon from the
+        15th to the 3rd, which made GA4's truncated series look complete and removed the only
+        thing the scenario is about. That is the third derived invariant a new planting field has
+        broken -- `events_described` twice before it -- so both are asserted directly rather than
+        trusted to a list somebody remembers to extend.
         """
         latest: date | None = None
+        for planted in self.daily_truth.values():
+            for truth in planted:
+                for day, _ in truth.days:
+                    if latest is None or day > latest:
+                        latest = day
         for response in list(self.responses.values()) + [
             variant for variants in self.period_responses.values() for variant in variants.values()
         ]:
@@ -387,9 +404,16 @@ class Scenario:
         # Derived from daily counts, so the interval the caller asked for is the interval it
         # gets. Ahead of the plain lookup for the same reason the listings are: a scenario that
         # also planted a payload here would otherwise go back to serving one fixed granularity.
-        truth = self.daily_truth.get(qualified_name)
-        if truth is not None:
-            return _resample(truth, params, matched=self._asks_about(truth.event, params))
+        planted = self.daily_truth.get(qualified_name)
+        if planted:
+            asked = (params or {}).get("event")
+            for truth in planted:
+                if not isinstance(asked, str) or asked == truth.event:
+                    return _resample(truth, params, matched=True)
+            # Named an event this scenario does not plant. Answered empty in the first series'
+            # shape, which keeps the payload readable -- an empty result that also lost its
+            # interval and window says "nothing here" about an unknown question.
+            return _resample(planted[0], params, matched=False)
         if qualified_name in self.responses:
             return self._for_subject(self.responses[qualified_name], params)
         return DISCOVERY_DEFAULTS.get(qualified_name, {"rows": [], "count": 0})
@@ -558,7 +582,7 @@ class Scenario:
         for response in sources:
             if isinstance(response, dict) and isinstance(response.get("event"), str):
                 found.add(response["event"])
-        found.update(truth.event for truth in self.daily_truth.values())
+        found.update(truth.event for planted in self.daily_truth.values() for truth in planted)
         return frozenset(found)
 
     def repositories_described(self) -> frozenset[str]:
@@ -1106,6 +1130,31 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
                 "github__commits",
             ),
         ),
+        # Signups, daily, so the interval the analyst asks for is the interval it gets.
+        #
+        # This was four weekly buckets, and a request for `interval="day"` received them --
+        # the same defect `partial_month_false_premise` carried, fixed there and left here.
+        # It cost real score twice in run 31: both the sufficiency gate and the verifier
+        # objected that no signups series established the decline day by day, and on the
+        # attempt that did retrieve this series they were describing four weekly points
+        # spanning the very boundary the question turns on. The weekly sums are unchanged
+        # within noise -- 402, 391, 236, 228 -- so a weekly call still sees what it saw.
+        daily_truth={
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="user signed up",
+                    days=tuple(
+                        (day, round(rate * (1 + rng.uniform(-0.06, 0.06))))
+                        for first, count, rate in (
+                            (date(2026, 6, 1), 14, 56.6),
+                            # The campaign ended on the 14th; volume steps down from the 15th.
+                            (date(2026, 6, 15), 16, 33.2),
+                        )
+                        for day in (first + timedelta(days=offset) for offset in range(count))
+                    ),
+                ),
+            )
+        },
         responses={
             "ga4__get_sessions": {
                 "totals": {"sessions": 30400},
@@ -1195,24 +1244,6 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
                 "pull_requests_excluded": True,
                 "issues": [],
             },
-            # Product-side confirmation that the funnel itself held: signup completions
-            # per session are flat while sessions collapse.
-            "posthog__event_trend": {
-                "event": "user signed up",
-                "measure": "count",
-                "interval": "week",
-                "start_date": "2026-06-01",
-                "end_date": "2026-06-30",
-                "breakdown_property": None,
-                "row_count": 4,
-                "series": [
-                    {"bucket": "2026-06-01T00:00:00", "value": 402},
-                    {"bucket": "2026-06-08T00:00:00", "value": 391},
-                    {"bucket": "2026-06-15T00:00:00", "value": 236},
-                    {"bucket": "2026-06-22T00:00:00", "value": 228},
-                ],
-                "total": 1257,
-            },
             "hubspot__contacts": {
                 "by_lifecycle_stage": {"lead": 463},
                 "contacts": [],
@@ -1298,6 +1329,28 @@ def insufficient_evidence(seed: int = 3) -> Scenario:
             required_capabilities=("ga4__compare_periods",),
             is_unanswerable=True,
         ),
+        # The product source agrees with the website source: within noise. Two independent
+        # sources both saying "nothing to see" is what makes "insufficient evidence" a finding
+        # rather than a shrug.
+        #
+        # Derived daily rather than typed as four weekly buckets, which is what it was. A
+        # request for `interval="day"` received weeks -- the defect that cost
+        # `campaign_traffic_drop` real score twice, and the last plain series still carrying it.
+        # 27/day flat across May: the weekly sums it replaces were 188, 194, 191, 185.
+        daily_truth={
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="user signed up",
+                    days=tuple(
+                        (
+                            date(2026, 5, 1) + timedelta(days=offset),
+                            round(27.1 * (1 + rng.uniform(-0.07, 0.07))),
+                        )
+                        for offset in range(28)
+                    ),
+                ),
+            )
+        },
         responses={
             "ga4__get_sessions": {
                 "totals": {"sessions": 18900},
@@ -1347,25 +1400,6 @@ def insufficient_evidence(seed: int = 3) -> Scenario:
                 "count": 0,
                 "pull_requests_excluded": True,
                 "issues": [],
-            },
-            # The product source agrees with the website source: within noise. Two
-            # independent sources both saying "nothing to see" is what makes
-            # "insufficient evidence" a finding rather than a shrug.
-            "posthog__event_trend": {
-                "event": "user signed up",
-                "measure": "count",
-                "interval": "week",
-                "start_date": "2026-05-01",
-                "end_date": "2026-05-28",
-                "breakdown_property": None,
-                "row_count": 4,
-                "series": [
-                    {"bucket": "2026-05-01T00:00:00", "value": 188},
-                    {"bucket": "2026-05-08T00:00:00", "value": 194},
-                    {"bucket": "2026-05-15T00:00:00", "value": 191},
-                    {"bucket": "2026-05-22T00:00:00", "value": 185},
-                ],
-                "total": 758,
             },
             "posthog__annotations": {
                 "annotation_count": 0,
@@ -1464,16 +1498,18 @@ def partial_month_false_premise(seed: int = 4) -> Scenario:
         # where the run-rate is visible, instead of returning three monthly buckets to a caller
         # that asked for days.
         daily_truth={
-            "posthog__event_trend": DailyTruth(
-                event="user signed up",
-                days=tuple(
-                    (day, round(rate * (1 + rng.uniform(-0.05, 0.05))))
-                    for first, count, rate in (
-                        (date(2026, 6, 1), 30, 156.4),
-                        (july, 31, 156.4),
-                        (august, 12, 157.0),
-                    )
-                    for day in (first + timedelta(days=offset) for offset in range(count))
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="user signed up",
+                    days=tuple(
+                        (day, round(rate * (1 + rng.uniform(-0.05, 0.05))))
+                        for first, count, rate in (
+                            (date(2026, 6, 1), 30, 156.4),
+                            (july, 31, 156.4),
+                            (august, 12, 157.0),
+                        )
+                        for day in (first + timedelta(days=offset) for offset in range(count))
+                    ),
                 ),
             )
         },
@@ -1701,31 +1737,25 @@ def tempting_coincidence(seed: int = 5) -> Scenario:
             required_capabilities=("posthog__event_trend", "github__recent_prs"),
             is_unanswerable=True,
         ),
-        responses={
-            # A real, unmistakable level shift: ~215/day to ~100/day on day 28 (2026-06-17).
-            "posthog__event_trend": {
-                "event": "user signed up",
-                "interval": "day",
-                "start_date": start.isoformat(),
-                "end_date": (start + timedelta(days=59)).isoformat(),
-                "measure": "total_events",
-                "row_count": 60,
-                "total": 9_300,
-                # Generated here rather than through `_daily`, which returns GA4's
-                # dimensions/metrics shape. A PostHog trend is bucket/value, and the analysis
-                # layer parses `bucket` -- handing it a GA4 row would make the movement
-                # invisible rather than wrong, which is the harder failure to notice.
-                "series": [
-                    {
-                        "bucket": f"{(start + timedelta(days=index)).isoformat()}T00:00:00Z",
-                        "value": round(
+        # A real, unmistakable level shift: ~215/day to ~100/day on 2026-06-17, which is 16x the
+        # noise. Derived so a weekly or monthly call aggregates it instead of receiving sixty
+        # daily rows in answer to a question about months.
+        daily_truth={
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="user signed up",
+                    days=tuple(
+                        (
+                            start + timedelta(days=index),
                             # Day 47 is 2026-06-17: 47 days before, 13 after.
-                            (215 if index < 47 else 100) * (1 + rng.uniform(-0.07, 0.07))
-                        ),
-                    }
-                    for index in range(60)
-                ],
-            },
+                            round((215 if index < 47 else 100) * (1 + rng.uniform(-0.07, 0.07))),
+                        )
+                        for index in range(60)
+                    ),
+                ),
+            )
+        },
+        responses={
             # Exactly one change in the window, the day before the movement. Copy only.
             "github__recent_prs": {
                 "repo": "acme/marketing-site",
@@ -1859,6 +1889,41 @@ def measurement_stopped(seed: int = 6) -> Scenario:
                 "posthog__event_trend",
             ),
         ),
+        # The second line, and there are two of them on purpose.
+        #
+        # Signups arrive normally right through the 15th, flat with noise: a perfectly flat
+        # series would let a weak analyst score as well as a good one, and the claim being
+        # supported is "unchanged", which needs visible ordinary variation. `$pageview` is
+        # planted alongside because this scenario asserts the site is fine and only its
+        # measurement stopped -- a world where one product event has data while every other
+        # returns nothing says the opposite, which is the site-outage reading it exists to
+        # rule out.
+        #
+        # Both derived rather than canned, which is what the tuple form of this field is for.
+        # A single series per capability would have kept this scenario on a payload that
+        # answers `interval="week"` with daily rows, in the one place a second series is the
+        # whole argument.
+        daily_truth={
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="user signed up",
+                    days=tuple(
+                        (july + timedelta(days=offset), round(21 * (1 + rng.uniform(-0.12, 0.12))))
+                        for offset in range(31)
+                    ),
+                ),
+                DailyTruth(
+                    event="$pageview",
+                    days=tuple(
+                        (
+                            july + timedelta(days=offset),
+                            round(1_450 * (1 + rng.uniform(-0.09, 0.09))),
+                        )
+                        for offset in range(31)
+                    ),
+                ),
+            )
+        },
         responses={
             # Thirty days of healthy sessions, then nothing. The rows stop on 3 August while the
             # request runs to the 15th, which is what `_gap` turns into `series_ends_early` --
@@ -1868,31 +1933,6 @@ def measurement_stopped(seed: int = 6) -> Scenario:
                 "totals": {"sessions": 4991},
                 "rows": _daily(july, 19, 158.0, noise=0.05, rng=rng)
                 + _daily(date(2026, 8, 1), 3, 161.0, noise=0.05, rng=rng),
-            },
-            # The second line: signups arrive normally right through the 15th. Flat, with noise,
-            # because a perfectly flat series would let a weak analyst score as well as a good
-            # one -- and because the claim being supported is "unchanged", which needs a series
-            # whose ordinary variation is visible.
-            #
-            # Also planted under `$pageview` in `subject_responses` below, because the world this
-            # scenario asserts is "the site is fine, its measurement stopped" -- and a world where
-            # one product event has data while every other returns nothing says the opposite.
-            "posthog__event_trend": {
-                "event": "user signed up",
-                "measure": "count",
-                "interval": "day",
-                "start_date": "2026-07-16",
-                "end_date": "2026-08-15",
-                "breakdown_property": None,
-                "row_count": 31,
-                "series": [
-                    {
-                        "bucket": f"{(july + timedelta(days=offset)).isoformat()}T00:00:00",
-                        "value": round(21 * (1 + rng.uniform(-0.12, 0.12))),
-                    }
-                    for offset in range(31)
-                ],
-                "total": 651,
             },
             # The decoy, one day before the cliff. Contents are the disarming evidence: a CI
             # cache key and a lockfile bump reach no user and cannot move sessions.
@@ -1948,27 +1988,6 @@ def measurement_stopped(seed: int = 6) -> Scenario:
         # series planted and the rest empty, an analyst asking about pageviews is told they
         # stopped too -- which points at a site outage, the exact reading this scenario exists to
         # rule out. The fixture must not argue against its own ground truth.
-        subject_responses={
-            "posthog__event_trend": {
-                "$pageview": {
-                    "event": "$pageview",
-                    "measure": "count",
-                    "interval": "day",
-                    "start_date": "2026-07-16",
-                    "end_date": "2026-08-15",
-                    "breakdown_property": None,
-                    "row_count": 31,
-                    "series": [
-                        {
-                            "bucket": f"{(july + timedelta(days=offset)).isoformat()}T00:00:00",
-                            "value": round(1_450 * (1 + rng.uniform(-0.09, 0.09))),
-                        }
-                        for offset in range(31)
-                    ],
-                    "total": 44_950,
-                },
-            },
-        },
     )
 
 

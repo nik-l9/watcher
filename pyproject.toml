@@ -54,6 +54,17 @@ dependencies = [
     # against a warehouse safe to run. Imported at module level and undeclared until now: it
     # happened to be present in one development venv, so the suite passed there and a clean
     # install failed to collect two test modules.
+    # The second provider, and therefore several: this SDK speaks to OpenAI, OpenRouter, Groq,
+    # Together, vLLM and Ollama alike, so one adapter reaches all of them. ADR 0001 set the
+    # trigger for a provider layer at "the second provider"; the layer is `cortex/agents/llm.py`,
+    # already two methods wide, and this is a client rather than a routing framework underneath
+    # it -- retry, deadline and timeout policy stay owned here, where four findings put them.
+    #
+    # Bounded below 4 for the reason the anthropic and redis bounds above exist: an unbounded
+    # major took this from 2.9 to 3.7 on the first install, and the anthropic 1.0 break -- a
+    # switch to `httpx2` that rejected the injected client and failed 45 tests -- was exactly
+    # that. Verified against 3.7.
+    "openai>=2.9,<4",
     "sqlglot>=27",
     # Slack Socket Mode's transport, in `cortex/inbound/socket_mode.py`. Reached this tree
     # only as an extra of `uvicorn[standard]`, which means an inbound transport depended on

@@ -1486,3 +1486,115 @@ class TestATruncatedDraftDoesNotDiscardTheInvestigation:
         from cortex.agents.models import card_for
 
         assert DRAFT_MAX_TOKENS == card_for(DEFAULT_MODEL).max_output_tokens
+
+
+class TestARejectedCredentialEndsTheRun:
+    """The loop keeps gathered evidence through a model failure and reports on it, which is
+    right for a blip. A rejected credential is not a blip: the drafting call uses the same
+    credential, so the run ends anyway — and it ended reporting a drafting failure, which sends
+    whoever reads it to the schema instead of to their key. Observed on a real revoked key.
+    """
+
+    async def test_it_stops_even_with_evidence_already_gathered(
+        self, session: AsyncSession
+    ) -> None:
+        from cortex.agents.llm import LLMAuthenticationFailed
+
+        class _Unauthorised(RecordedLLM):
+            async def complete(self, **kwargs: object) -> object:  # type: ignore[override]
+                raise LLMAuthenticationFailed("openai_compat: 401 Incorrect API key provided")
+
+        ctx = await _tenant(session)
+        investigation_id = await _investigation(session, ctx)
+        investigator = _investigator(_Unauthorised(), _ProbeTool())
+
+        with pytest.raises(InvestigationFailed) as caught:
+            await investigator.investigate(
+                session,
+                ctx,
+                question="why did signups fall?",
+                investigation_id=investigation_id,
+            )
+        # Names the credential, not the drafting step.
+        assert "could not authenticate" in str(caught.value)
+        assert "Incorrect API key" in str(caught.value)
+
+
+class TestASparseRefutationIsNotAStub:
+    """`_is_degenerate` refused a correct report twice and discarded the investigation.
+
+    The test was calibrated on thirteen drafts and its docstring recorded the assumption: false
+    premise reports legitimately had zero *hypotheses*, but none had zero of both. Run 30 gave
+    the counter-example on `partial_month_false_premise`. A question whose answer is "nothing
+    happened" has no cause to hypothesise about, and may carry its whole answer in the premise
+    check and the summary — which is what `GUIDANCE[Shape.FACTUAL]` asks for.
+
+    The discriminator is structural rather than a length threshold: `premise` defaults to
+    `NONE_ASSERTED` and `premise_checked` to `""`, so a collapsed draft never reaches either,
+    while a refutation fills both.
+    """
+
+    def test_a_refutation_with_no_findings_survives(self) -> None:
+        from cortex.agents.investigator import _is_degenerate
+        from cortex.reports.schema import PremiseVerdict
+
+        evidence = [uuid.uuid4()]
+        report = InvestigationReport(
+            question="Did our signups fall from last month?",
+            executive_summary=[Claim(text="No — signups did not fall.", evidence_ids=evidence)],
+            premise=PremiseVerdict.FALSE,
+            premise_checked=(
+                "August is 12 days old: 157.0 signups/day against 156.4/day across July."
+            ),
+            confidence=Confidence.HIGH,
+        )
+        assert not _is_degenerate(report, evidence)
+
+    def test_a_stub_is_still_caught(self) -> None:
+        """The original defect: two attempts in fifteen returned a summary of one placeholder
+        claim and nothing else. A stub never records a premise verdict, which is what separates
+        the two cases."""
+        from cortex.agents.investigator import _is_degenerate
+
+        evidence = [uuid.uuid4()]
+        stub = InvestigationReport(
+            question="Why did signups fall?",
+            executive_summary=[Claim(text="Placeholder text.", evidence_ids=evidence)],
+            confidence=Confidence.LOW,
+        )
+        assert _is_degenerate(stub, evidence)
+
+    def test_a_premise_verdict_with_no_check_behind_it_is_still_a_stub(self) -> None:
+        """Half-filled is not filled. A draft that sets the verdict enum and writes no check has
+        asserted nothing a reader can evaluate, and the exemption must not be reachable by
+        emitting one enum value."""
+        from cortex.agents.investigator import _is_degenerate
+        from cortex.reports.schema import PremiseVerdict
+
+        evidence = [uuid.uuid4()]
+        half = InvestigationReport(
+            question="Did signups fall?",
+            executive_summary=[Claim(text="Placeholder text.", evidence_ids=evidence)],
+            premise=PremiseVerdict.FALSE,
+            premise_checked="   ",
+            confidence=Confidence.LOW,
+        )
+        assert _is_degenerate(half, evidence)
+
+    def test_a_report_with_findings_is_never_degenerate(self) -> None:
+        """Unchanged behaviour, asserted so the exemption cannot be read as loosening the rest."""
+        from cortex.agents.investigator import _is_degenerate
+
+        evidence = [uuid.uuid4()]
+        report = InvestigationReport(
+            question="Why did signups fall?",
+            executive_summary=[Claim(text="Signups fell 18%.", evidence_ids=evidence)],
+            findings=[
+                Finding(
+                    title="Mobile conversion fell",
+                    claims=[Claim(text="Mobile fell 31%.", evidence_ids=evidence)],
+                )
+            ],
+            confidence=Confidence.MEDIUM,
+        )
+        assert not _is_degenerate(report, evidence)

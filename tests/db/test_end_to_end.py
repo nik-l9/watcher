@@ -414,7 +414,7 @@ class TestWorkerRunsItForReal:
         tenant_id, investigation_id = _in_own_loop(self._dsn, _seed)
 
         monkeypatch.setattr(
-            worker, "AnthropicLLM", lambda *a, **k: _Analyst([_tool_turn(), _done()], _report)
+            worker, "build_llm", lambda *a, **k: _Analyst([_tool_turn(), _done()], _report)
         )
         result = worker.run_investigation(
             {"tenant_id": str(tenant_id), "investigation_id": str(investigation_id)}
@@ -449,7 +449,7 @@ class TestWorkerRunsItForReal:
             return ctx.tenant_id, await _queued(s, ctx)
 
         tenant_id, investigation_id = _in_own_loop(self._dsn, _seed)
-        monkeypatch.setattr(worker, "AnthropicLLM", lambda *a, **k: RecordedLLM())
+        monkeypatch.setattr(worker, "build_llm", lambda *a, **k: RecordedLLM())
 
         result = worker.run_investigation(
             {"tenant_id": str(tenant_id), "investigation_id": str(investigation_id)}

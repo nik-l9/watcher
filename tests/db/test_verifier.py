@@ -634,13 +634,17 @@ class TestConcurrentJudging:
         evidence = await _evidence(session, ctx, investigation_id)
 
         class _FlakyOnce(RecordedLLM):
-            def __init__(self) -> None:
-                super().__init__()
-                self.calls = 0
+            """Fails for one claim on every attempt, keyed by its text.
+
+            Keyed by claim rather than by call count because the judging call is retried once
+            now: a counter would fail attempt one and be rescued by attempt two, which measures
+            the retry rather than the property this test is about. Failing persistently for one
+            claim is what keeps it about "one unverifiable claim does not lose the others".
+            """
 
             async def structured(self, **kwargs):  # type: ignore[no-untyped-def]
-                self.calls += 1
-                if self.calls == 2:
+                rendered = kwargs["messages"][0].content
+                if "Claim 2." in rendered:
                     raise LLMError("capacity")
                 return {"verdict": "supported", "reason": "holds"}, Usage(
                     input_tokens=10, output_tokens=5
@@ -876,3 +880,99 @@ class TestAWrongFigureDoesNotRemoveASoundFinding:
         assert result.overstated_count == 1
         disclosure = " ".join(r.description for r in result.report.risks)
         assert "go beyond their evidence" in disclosure
+
+
+class TestATransientFailureIsRetried:
+    """A timeout was costing a delivered hallucination.
+
+    Run 30 lost three claims on one attempt to three consecutive `APITimeoutError`. No logic
+    defect — a slow minute at the provider — and the suite correctly reported three delivered
+    hallucinations, which must be zero, so the run failed for a reason nobody could act on.
+
+    A claim this call cannot judge ships unchecked. Giving up after one attempt makes a
+    transient blip indistinguishable from a genuinely unverifiable claim, and those deserve
+    different outcomes.
+    """
+
+    async def test_a_claim_is_rescued_by_the_second_attempt(self, session: AsyncSession) -> None:
+        ctx = await _tenant(session)
+        investigation_id = await _investigation(session, ctx)
+        evidence = await _evidence(session, ctx, investigation_id)
+
+        class _TimesOutOnce(RecordedLLM):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attempts = 0
+
+            async def structured(self, **kwargs):  # type: ignore[no-untyped-def]
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise LLMError("APITimeoutError")
+                return {"verdict": "supported", "reason": "holds"}, Usage(
+                    input_tokens=10, output_tokens=5
+                )
+
+        llm = _TimesOutOnce()
+        result = await AdversarialVerifier(llm).verify(
+            session,
+            ctx,
+            investigation_id=investigation_id,
+            report=_report([Claim(text="Signups fell 18%.", evidence_ids=[evidence.id])]),
+        )
+        assert result.unverified == []
+        assert llm.attempts == 2
+
+    async def test_a_persistent_failure_is_still_reported(self, session: AsyncSession) -> None:
+        """One retry, not a policy. A claim that cannot be judged twice is disclosed rather
+        than retried indefinitely — the count is what fails the build, and it should."""
+        ctx = await _tenant(session)
+        investigation_id = await _investigation(session, ctx)
+        evidence = await _evidence(session, ctx, investigation_id)
+
+        class _AlwaysTimesOut(RecordedLLM):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attempts = 0
+
+            async def structured(self, **kwargs):  # type: ignore[no-untyped-def]
+                self.attempts += 1
+                raise LLMError("APITimeoutError")
+
+        llm = _AlwaysTimesOut()
+        result = await AdversarialVerifier(llm).verify(
+            session,
+            ctx,
+            investigation_id=investigation_id,
+            report=_report([Claim(text="Signups fell 18%.", evidence_ids=[evidence.id])]),
+        )
+        assert len(result.unverified) == 1
+        assert "APITimeoutError" in result.unverified[0]
+        assert llm.attempts == 2
+
+    async def test_a_rejected_credential_is_not_retried(self, session: AsyncSession) -> None:
+        """The credential will reject the next call too, and spending another deadline to learn
+        that is waste — the same distinction the investigation loop draws."""
+        from cortex.agents.llm import LLMAuthenticationFailed
+
+        ctx = await _tenant(session)
+        investigation_id = await _investigation(session, ctx)
+        evidence = await _evidence(session, ctx, investigation_id)
+
+        class _Unauthorised(RecordedLLM):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attempts = 0
+
+            async def structured(self, **kwargs):  # type: ignore[no-untyped-def]
+                self.attempts += 1
+                raise LLMAuthenticationFailed("401 Incorrect API key provided")
+
+        llm = _Unauthorised()
+        result = await AdversarialVerifier(llm).verify(
+            session,
+            ctx,
+            investigation_id=investigation_id,
+            report=_report([Claim(text="Signups fell 18%.", evidence_ids=[evidence.id])]),
+        )
+        assert llm.attempts == 1
+        assert len(result.unverified) == 1

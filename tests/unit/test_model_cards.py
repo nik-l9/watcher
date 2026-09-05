@@ -41,11 +41,26 @@ class TestTheTable:
     def test_the_default_model_is_permitted(self) -> None:
         assert DEFAULT_MODEL in ALLOWED_MODELS
 
-    def test_exactly_one_model_is_permitted(self) -> None:
+    def test_exactly_one_model_is_permitted_per_provider(self) -> None:
         """A cost decision, stated in `DEFAULT_MODEL`'s docstring. This test is what makes
-        widening it a deliberate act rather than a side effect: adding a permitted model
-        fails here and the failure is where the reasoning lives."""
-        assert ALLOWED_MODELS == frozenset({"claude-sonnet-5"})
+        widening it a deliberate act rather than a side effect, and it did its job: adding an
+        OpenAI-compatible card failed here, which is where the reasoning belongs.
+
+        **What changed and what did not.** The rule was one permitted model, full stop. It is now
+        one *per provider*, because the reason a second provider exists is that the grounding
+        stack was reachable only with an Anthropic key -- which is the largest barrier to anyone
+        adopting this. The cost intent survives intact: within a provider you still cannot
+        reach a more expensive model by accident, which is the failure the original rule was
+        guarding against. Two providers is a portability decision; two models in one provider
+        would be the cost decision reopening itself.
+        """
+        by_provider: dict[str, set[str]] = {}
+        for model_id in ALLOWED_MODELS:
+            by_provider.setdefault(card_for(model_id).provider, set()).add(model_id)
+        assert by_provider == {
+            "anthropic": {"claude-sonnet-5"},
+            "openai_compat": {"gpt-5.2"},
+        }
 
     def test_allowed_models_is_derived_from_the_cards(self) -> None:
         """Not maintained beside them. A second list is a list that disagrees."""
