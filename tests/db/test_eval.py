@@ -2042,29 +2042,40 @@ class TestAPlainTrendSeriesMustBeDerived:
     recorded here rather than left as an absence, so the next reader knows it was considered.
     """
 
-    #: `onboarding_regression` plants a per-device breakdown, where each row carries a `segment`
-    #: alongside bucket and value. `DailyTruth` holds one series of `(day, count)` and cannot
-    #: express that. Its payload is already daily, so the defect this test guards is not
-    #: reachable there — a request for days gets days.
-    SEGMENTED = {"onboarding_regression"}
+    @staticmethod
+    def _is_segmented(planted: dict) -> bool:
+        """Whether this payload is a per-segment breakdown, which `DailyTruth` cannot express.
+
+        Derived from the payload rather than from a list of scenario names, which is the same
+        lesson four derivations learned the hard way today: a name-keyed exemption does not
+        follow the data. `onboarding_regression_undecidable` inherits its parent's segmented
+        series and would have failed a name check while being exactly as exempt.
+        """
+        return all("segment" in row for row in planted.get("series") or [{}])
 
     def test_no_scenario_plants_a_canned_plain_trend(self) -> None:
         for scenario in SCENARIOS:
             planted = scenario.responses.get("posthog__event_trend")
-            if planted is None or scenario.name in self.SEGMENTED:
+            if planted is None or self._is_segmented(planted):
                 continue
             raise AssertionError(
                 f"{scenario.name} plants a canned posthog__event_trend payload. A canned series "
                 "answers whatever interval it was typed with, whatever the caller asked for. "
-                "Plant it as `daily_truth` instead, or add it to SEGMENTED with the reason."
+                "Plant it as `daily_truth` instead."
             )
 
-    def test_the_segmented_exemption_is_really_segmented(self) -> None:
-        """An exemption nobody checks becomes a place to hide things. If that payload ever stops
-        carrying segments, it has no reason to stay canned and this says so."""
-        for name in self.SEGMENTED:
+    def test_the_exemption_only_covers_a_real_breakdown(self) -> None:
+        """An exemption nobody checks becomes a place to hide things. A payload that stops
+        carrying segments has no reason to stay canned, and then the test above catches it."""
+        exempt = [
+            s.name
+            for s in SCENARIOS
+            if (p := s.responses.get("posthog__event_trend")) and self._is_segmented(p)
+        ]
+        assert exempt, "no segmented payloads left: the exemption can be deleted"
+        for name in exempt:
             series = by_name(name).responses["posthog__event_trend"]["series"]
-            assert all("segment" in row for row in series), name
+            assert series and all("segment" in row for row in series), name
 
     def test_every_derived_series_answers_the_interval_asked(self) -> None:
         """The property itself, across every scenario that has one, rather than per fixture."""
@@ -2137,3 +2148,141 @@ class TestThePostLoopPhasesAreAccounted:
         assert "investigation.usage = investigation.usage + sufficiency.usage" in source
         assert "record_usage(VERIFY, verification.usage)" in source
         assert "record_usage(SUFFICIENCY, sufficiency.usage)" in source
+
+
+class TestEveryPlantingFieldIsSeenByEveryDerivation:
+    """Four derivations each learned about a new planting field the hard way.
+
+    `daily_truth` broke `events_described` (twice — `subject_responses` had broken it first),
+    then `as_of`, and then `connected_tools`. That last one was the worst: moving
+    `campaign_traffic_drop`'s only PostHog planting into `daily_truth` left the connector
+    *disconnected*, so the analyst was never offered `posthog__event_trend` and the daily series
+    built for that scenario could not be reached at all. It still scored 1.00, from GA4 alone,
+    which is exactly why nothing noticed.
+
+    So the enumeration lives in one place, `planted_capabilities`, and this class is what fails
+    when a new field is added without wiring it in.
+    """
+
+    #: Every attribute a scenario can plant a capability's answer in. Adding a field here
+    #: without adding it to `planted_capabilities` fails the first test below.
+    PLANTING_FIELDS = ("responses", "period_responses", "subject_responses", "daily_truth")
+
+    def test_planted_capabilities_covers_every_planting_field(self) -> None:
+        for scenario in SCENARIOS:
+            for field in self.PLANTING_FIELDS:
+                planted = getattr(scenario, field)
+                missing = set(planted) - set(scenario.planted_capabilities)
+                assert not missing, f"{scenario.name}.{field} not seen: {sorted(missing)}"
+
+    def test_the_field_list_matches_the_dataclass(self) -> None:
+        """The list above is the thing that goes stale. Checked against the dataclass itself, so
+        a fifth planting field cannot be added without this failing."""
+        import dataclasses
+
+        from cortex.eval.fixtures import Scenario
+
+        keyed_by_capability = {
+            f.name
+            for f in dataclasses.fields(Scenario)
+            if f.name.endswith(("responses", "truth")) and f.name != "ground_truth"
+        }
+        assert keyed_by_capability == set(self.PLANTING_FIELDS)
+
+    def test_a_connector_is_offered_wherever_its_answers_are_planted(self) -> None:
+        """The defect itself. A scenario planting a capability whose connector is not offered has
+        built data the analyst cannot reach, and the eval cannot tell that from data it chose not
+        to use."""
+        for scenario in SCENARIOS:
+            for capability in scenario.planted_capabilities:
+                tool = capability.split("__")[0]
+                assert tool in scenario.connected_tools, f"{scenario.name}: {capability}"
+
+    def test_the_horizon_and_the_catalogue_see_derived_series_too(self) -> None:
+        """The two derivations `daily_truth` broke before this one, asserted here as well so all
+        four are pinned in one place rather than three."""
+        for scenario in SCENARIOS:
+            for series in scenario.daily_truth.values():
+                for truth in series:
+                    assert truth.event in scenario.events_described(), scenario.name
+                    if scenario.as_of is not None:
+                        assert scenario.as_of >= max(day for day, _ in truth.days), scenario.name
+
+
+class TestTheDeclineTwinsArePairs:
+    """A should-answer scenario beside a should-decline twin, differing by one perturbation.
+
+    The suite's hard bar is `delivered_hallucinations == 0`, which **rewards silence**: a system
+    declining every question scores perfectly on grounding, and nothing else here could tell
+    that from one answering well. Several gates got stricter today. Each bought accuracy at some
+    unmeasured cost in over-abstention, and a pair is what prices that cost.
+    """
+
+    PAIRS = (
+        ("onboarding_regression", "onboarding_regression_undecidable"),
+        ("campaign_traffic_drop", "campaign_traffic_drop_undecidable"),
+    )
+
+    @pytest.mark.parametrize(("parent_name", "twin_name"), PAIRS)
+    def test_the_twin_differs_only_where_it_should(self, parent_name: str, twin_name: str) -> None:
+        """Derived with `dataclasses.replace`, so the difference is one argument rather than two
+        hundred lines that drift apart the first time either is edited."""
+        parent, twin = by_name(parent_name), by_name(twin_name)
+
+        # The question is identical: same ask, different world.
+        assert twin.question == parent.question
+        # The movement survives. Everything except the blanked capabilities is the parent's.
+        changed = {
+            capability
+            for capability in parent.responses
+            if parent.responses[capability] != twin.responses.get(capability)
+        }
+        assert changed, twin_name
+        assert changed <= set(twin.responses)
+        # And the perturbation is confined to one connector.
+        assert len({capability.split("__")[0] for capability in changed}) == 1, sorted(changed)
+
+    @pytest.mark.parametrize(("parent_name", "twin_name"), PAIRS)
+    def test_only_the_twin_declines(self, parent_name: str, twin_name: str) -> None:
+        """The parent has a findable cause and must name it; the twin must not. Without both
+        halves, a gate that refuses everything looks like a gate that works."""
+        parent, twin = by_name(parent_name), by_name(twin_name)
+        assert not parent.ground_truth.is_unanswerable
+        assert parent.ground_truth.required_signals
+        assert twin.ground_truth.is_unanswerable
+        assert not twin.ground_truth.required_signals, (
+            "a twin with signals would penalise a gate for withholding a cause its own ground "
+            "truth says cannot be established"
+        )
+
+    @pytest.mark.parametrize(("parent_name", "twin_name"), PAIRS)
+    def test_the_perturbation_removes_the_cause_from_the_evidence(
+        self, parent_name: str, twin_name: str
+    ) -> None:
+        """The blanked capability must actually return nothing, in the shape a real connector
+        uses for "looked, found nothing" — which is a different observation from "nobody asked",
+        and the analyst has to be able to tell them apart."""
+        parent, twin = by_name(parent_name), by_name(twin_name)
+        for capability, payload in twin.responses.items():
+            if parent.responses.get(capability) == payload:
+                continue
+            # `count == 0` is the connector's own statement that it looked and found nothing.
+            assert payload.get("count") == 0, (capability, payload)
+            # At least one result list is empty. Not *all* of them: a blanked payload keeps its
+            # metadata, and `environments_available: ["prod-web", "staging"]` is the field that
+            # makes "looked, found nothing" distinguishable from "nobody looked" — which the
+            # analyst has to be able to tell apart, and which the parent scenarios rely on.
+            listed = [v for v in payload.values() if isinstance(v, list)]
+            assert any(not v for v in listed), (capability, payload)
+
+    @pytest.mark.parametrize(("_parent", "twin_name"), PAIRS)
+    def test_the_twin_keeps_every_fixture_invariant(self, _parent: str, twin_name: str) -> None:
+        """Deriving from the parent means the twin inherits `daily_truth`, `as_of`, the event
+        catalogue and the connector set — so the four invariants a new planting field has broken
+        in turn hold here for free rather than by being re-checked by hand."""
+        twin = by_name(twin_name)
+        assert twin.as_of is not None
+        advertised = {e["name"] for e in twin.response_for("posthog__list_events")["events"]}
+        assert twin.events_described() <= advertised
+        for capability in twin.planted_capabilities:
+            assert capability.split("__")[0] in twin.connected_tools, capability

@@ -27,6 +27,7 @@ connected, so revenue impact is unknown" is a better answer than a crash.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -1061,14 +1062,42 @@ def _is_degenerate(report: InvestigationReport, evidence_ids: list[uuid.UUID]) -
     return not _answers_by_premise(report)
 
 
+#: A premise check that actually checked something cites what it measured. Every real one does:
+#: "August is 12 days old: 157.0 signups/day against 156.4/day across all of July." A stub
+#: writes "placeholder", "n/a", or restates the question back.
+_CHECK_CITES_A_FIGURE = re.compile(r"\d")
+
+#: Verdicts under which a report may legitimately carry no findings and no hypotheses.
+#:
+#: `HOLDS` is excluded, and that is the point: if the premise holds then the movement really
+#: happened, and a report saying nothing about it is a stub whatever it wrote in the check.
+#: `HOLDS` is also what a collapsing draft defaults to, having decided nothing.
+_ANSWERABLE_BY_PREMISE_ALONE = frozenset({PremiseVerdict.FALSE, PremiseVerdict.UNVERIFIABLE})
+
+
 def _answers_by_premise(report: InvestigationReport) -> bool:
     """Whether the report's answer *is* its premise verdict.
 
     True for a refutation of a false premise, which needs no findings and no hypotheses to be
-    complete. False for a stub, which never reaches either field.
+    complete. False for a stub.
+
+    **The first version of this was reachable by every stub it existed to catch.** It asked only
+    that `premise` be set and `premise_checked` be non-empty -- and both are filled by habit
+    rather than by work: `llm_report_schema()` emits them at indices 1 and 2, *before* findings,
+    and `_PREMISE_CHECK` in `shape.py` instructs every report to set them. So a draft that
+    collapsed on findings had already filled both. `premise=holds, premise_checked="."` was
+    exempt, as was a check that merely restated the question.
+
+    Three conditions now, each closing one of those: the verdict has to be one a report can
+    legitimately answer with alone, the check has to cite a figure, and it has to be long enough
+    to be a sentence. Deliberately structural -- a search for the word "placeholder" would be
+    the fifth keyword list in this codebase standing in for meaning.
     """
-    return report.premise is not PremiseVerdict.NONE_ASSERTED and bool(
-        report.premise_checked.strip()
+    checked = report.premise_checked.strip()
+    return (
+        report.premise in _ANSWERABLE_BY_PREMISE_ALONE
+        and len(checked) >= 40
+        and bool(_CHECK_CITES_A_FIGURE.search(checked))
     )
 
 

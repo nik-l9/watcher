@@ -58,6 +58,7 @@ from cortex.db.models import Evidence, ToolCall
 from cortex.db.threads import citable_investigation_ids
 from cortex.eval.fixtures import (
     GroundTruth,
+    Requirement,
     Scenario,
     alternatives_of,
     describe_requirement,
@@ -71,12 +72,17 @@ from cortex.reports.schema import (
 )
 from cortex.reports.shape import Shape, shape_for
 from cortex.reports.sufficiency import AppliedSufficiency
+from cortex.reports.verifier import (
+    _DECLINES_A_CAUSE,
+    VerificationResult,
+    causal_claims,
+    causal_hypotheses,
+)
 
 # Aliased because `Verdict` above is the *hypothesis* verdict from the report schema, and this
 # is the per-claim one. Same spelling, different enum: comparing a claim against the wrong one
 # never matches, which would leave the dimension below reporting a clean 1.00 forever.
 from cortex.reports.verifier import Verdict as ClaimVerdictKind
-from cortex.reports.verifier import VerificationResult, causal_claims, causal_hypotheses
 from cortex.tenancy.context import TenantContext
 from cortex.tools.executor import canonical_hash
 
@@ -880,7 +886,6 @@ class Scorer:
         # -- a summary describing a 68.4% collapse without naming the exhausted budget behind it
         # -- and it clears a reading here where the summary says the data "stops after
         # 2026-08-03" in its own words.
-        surviving = " ".join(claim.text for claim in sufficiency.report.executive_summary).lower()
         cut = [
             requirement
             for requirement in truth.required_signals
@@ -889,7 +894,7 @@ class Scorer:
         protected = [
             describe_requirement(requirement)
             for requirement in cut
-            if not any(alt.lower() in surviving for alt in alternatives_of(requirement))
+            if not _still_asserted_in_summary(sufficiency.report, requirement)
         ]
         if not protected:
             return Dimension(
@@ -961,7 +966,6 @@ class Scorer:
         # that merely mentioned the cause, and I read it wrong twice before checking the
         # summaries. `accuracy` cannot see it either: it searches the whole report, so a cause
         # surviving in a finding scores 1.00 while the summary no longer carries it.
-        surviving = " ".join(claim.text for claim in verification.report.executive_summary).lower()
         cut = [
             requirement
             for requirement in truth.required_signals
@@ -970,7 +974,7 @@ class Scorer:
         protected = [
             describe_requirement(requirement)
             for requirement in cut
-            if not any(alt.lower() in surviving for alt in alternatives_of(requirement))
+            if not _still_asserted_in_summary(verification.report, requirement)
         ]
         if not protected:
             # Two different clean outcomes, reported differently: nothing bearing the cause was
@@ -1027,6 +1031,52 @@ class Scorer:
                 + (f" ({investigation.duration_ms}ms of it in the loop)" if loop_only else "")
             ),
         )
+
+
+def _still_asserted_in_summary(report: InvestigationReport, requirement: Requirement) -> bool:
+    """Whether the delivered summary still *asserts* this signal as a cause.
+
+    **Not "does the word appear".** That was the test, and it exonerated three things it should
+    not have -- each a summary a drafter can plausibly write:
+
+      - "Paid search sessions collapsed 68.4% in the period following the spring campaign."
+        The word is present, descriptively. This is the run-32 defect verbatim, the mechanism
+        without the cause, and it scored clean.
+      - "The campaign was NOT the cause; the drop remains unexplained."
+        The word is present, negated. The dimension read the reader as informed.
+      - `"ends"`, an alternative on `measurement_stopped`, matches inside "trends", "depends",
+        "recommends" and "weekends".
+
+    So the signal must appear on a word boundary, in a claim that does not deny it.
+
+    **It deliberately does not also require the claim to be causal**, which was the first
+    attempt and was worse. On `measurement_stopped` the right answer is "the GA4 sessions data
+    simply stops being recorded after August 3" -- a statement of fact about a data incident,
+    with no causal marker in it at all. Requiring `is_causal_claim` rejected the correct summary
+    on every attempt of that scenario, and on two of `campaign_traffic_drop`. Reaching for the
+    stricter predicate cost more than the looseness it was fixing: this dimension does not gate,
+    so a false complaint sends someone chasing a defect that is not there, which has already
+    happened twice today.
+
+    What remains undetectable, and is worth stating rather than implying: "collapsed 68.4% in
+    the period following the spring campaign" mentions the signal without asserting it, and no
+    substring test separates that from asserting it. The negated form is caught; the merely
+    descriptive one is not. Nor can this tell which noun a causal verb attaches to -- "the
+    deploy caused the fall; the campaign end was coincidental" passes -- and that belongs to
+    `decoy_rejection` rather than here.
+    """
+    for claim in report.executive_summary:
+        lowered = claim.text.lower()
+        # A claim denying the signal is the cause does not carry it for the reader. Reuses the
+        # verifier's own list so the two cannot disagree about what a denial looks like.
+        if any(phrase in lowered for phrase in _DECLINES_A_CAUSE):
+            continue
+        if any(
+            re.search(rf"\b{re.escape(alt.lower())}\b", lowered)
+            for alt in alternatives_of(requirement)
+        ):
+            return True
+    return False
 
 
 def _removal_breakdown(gate_result: GateResult, verification: VerificationResult | None) -> str:
