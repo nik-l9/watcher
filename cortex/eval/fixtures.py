@@ -30,6 +30,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+# The connector's own change arithmetic, imported rather than reimplemented. A fixture that
+# computes percentage change its own way is a second implementation of the thing the contract
+# test compares, and the two would drift on the first edge case (a zero previous value).
+from cortex.tools.ga4 import _absolute, _percent
+
 
 class Difficulty(enum.StrEnum):
     #: One clear cause, decoys present but weakly correlated.
@@ -245,6 +250,11 @@ class Scenario:
     #: this resolves to the `"after"` variant.
     change_date: date | None = None
 
+    #: Dated records a capability filters by subject and window, keyed by `tool__capability`.
+    #: See `DatedRecords`. ADR 0006's first landing; the canned payloads it replaces could not
+    #: honour `repo`, `since` or `until` except by remembering to.
+    dated_records: dict[str, DatedRecords] = field(default_factory=dict)
+
     #: Daily counts a trend capability derives every interval from, keyed by `tool__capability`.
     #:
     #: A canned payload answers `interval="day"` with whatever buckets it was typed with, so a
@@ -284,6 +294,12 @@ class Scenario:
     #: already unit-tested, so the scarcer one wins here.
     compute_disclosures: bool = True
 
+    #: The scenario's GA4 world as one daily session series plus how it divides. See
+    #: `MetricSeries`. Every `ga4__*` capability it declares is projected from this, so the
+    #: funnel, the period comparison and the session series cannot disagree about the same
+    #: window -- which three of them did, by up to 15%.
+    metric_series: MetricSeries | None = None
+
     @property
     def as_of(self) -> date | None:
         """The last day this scenario's world has any data for.
@@ -317,6 +333,8 @@ class Scenario:
         trusted to a list somebody remembers to extend.
         """
         latest: date | None = None
+        if self.metric_series is not None:
+            latest = max(day for day, _ in self.metric_series.daily)
         for planted in self.daily_truth.values():
             for truth in planted:
                 for day, _ in truth.days:
@@ -387,6 +405,8 @@ class Scenario:
             | set(self.period_responses)
             | set(self.subject_responses)
             | set(self.daily_truth)
+            | set(self.dated_records)
+            | (self.metric_series.capabilities if self.metric_series else frozenset())
         )
 
     def response_for(self, qualified_name: str, params: dict[str, Any] | None = None) -> Any:
@@ -404,6 +424,20 @@ class Scenario:
         data does not exist. A scenario that cares plants its own; the rest get a plausible
         environment.
         """
+        # Ahead of every other layer: where a scenario declares a GA4 world, that world is the
+        # authority on it. A payload planted for the same capability would otherwise reintroduce
+        # exactly the second, contradicting figure `MetricSeries` exists to make unrepresentable.
+        if self.metric_series is not None and qualified_name in GA4_SERIES_CAPABILITIES:
+            projection = _GA4_PROJECTIONS.get(qualified_name)
+            if projection is not None and qualified_name in self.metric_series.capabilities:
+                return projection(self.metric_series, params)
+        if self._names_another_project(qualified_name, params):
+            # A PostHog project this tenant has and this scenario has no data in. The projects
+            # listing advertises two -- `web-app` and `oss-client` -- and every capability
+            # answered both with the same series, so an analyst that queried the wrong project
+            # was rewarded exactly as well as one that read the listing and chose. The last
+            # place in the suite where a payload answered a question it was not asked.
+            return self._nothing_for(qualified_name, params)
         variants = self.period_responses.get(qualified_name)
         if variants:
             return variants["after" if self._is_after(params) else "before"]
@@ -413,8 +447,21 @@ class Scenario:
         if by_subject and params:
             for key in self.SUBJECT_KEYS:
                 asked = params.get(key)
-                if isinstance(asked, str) and asked in by_subject:
-                    return by_subject[asked]
+                # Compared as a string because a pull-request number arrives as an int and an
+                # event name as a str, and the layer is keyed the same way for both.
+                if isinstance(asked, str | int) and str(asked) in by_subject:
+                    return by_subject[str(asked)]
+            planted = next(iter(by_subject.values()))
+            entity = next((key for key in _ENTITY_KEYS if key in planted), None)
+            if entity is not None:
+                # A record this scenario does not describe, on a capability that looks records
+                # up one at a time. Answered in the planted shape with every field about *some
+                # other* record nulled -- because the payload this replaces returned pull
+                # request 913 whatever number was asked for, so an analyst opening the pricing
+                # decoy was handed the mobile onboarding modal's review thread under the
+                # decoy's number. On a required capability, which made the scenario reward the
+                # wrong lookup with the right answer.
+                return _empty_like(planted, params, self.SUBJECT_KEYS)
         # The two derived listings come *before* the plain lookup, and the ordering is the whole
         # point: a scenario that plants its own catalogue would otherwise bypass the derivation
         # and go back to advertising a world the rest of the fixture cannot answer for. Both
@@ -427,6 +474,17 @@ class Scenario:
         # Derived from daily counts, so the interval the caller asked for is the interval it
         # gets. Ahead of the plain lookup for the same reason the listings are: a scenario that
         # also planted a payload here would otherwise go back to serving one fixed granularity.
+        records = self.dated_records.get(qualified_name)
+        if records is None:
+            # Inferred from a canned payload's own shape, so a capability not yet migrated by
+            # hand still honours its parameters. Explicit `dated_records` wins where both exist.
+            planted_payload = self.responses.get(qualified_name)
+            if isinstance(planted_payload, dict):
+                if _is_metric_rows(planted_payload):
+                    return _project_metric_rows(planted_payload, params)
+                records = _auto_records(qualified_name, planted_payload)
+        if records is not None:
+            return _project_records(records, params)
         planted = self.daily_truth.get(qualified_name)
         if planted:
             asked = (params or {}).get("event")
@@ -493,7 +551,47 @@ class Scenario:
     #:
     #: A fixture is keyed by capability, so without this it answers every request for a series
     #: with the one series it holds -- whatever was asked for.
-    SUBJECT_KEYS = ("event", "repo")
+    SUBJECT_KEYS = ("event", "repo", "number")
+
+    def _names_another_project(self, qualified_name: str, params: dict[str, Any] | None) -> bool:
+        """True when a PostHog call named a project other than this scenario's own.
+
+        Read from the projects listing rather than declared, so the catalogue the analyst is
+        shown and the project the fixture answers for cannot drift apart -- which is the
+        invariant the repository and event listings each had to learn the hard way.
+        """
+        if not qualified_name.startswith("posthog__") or not params:
+            return False
+        asked = params.get("project")
+        if not isinstance(asked, str | int):
+            return False
+        listing = self.responses.get("posthog__list_projects") or DISCOVERY_DEFAULTS.get(
+            "posthog__list_projects", {}
+        )
+        default = listing.get("default_project")
+        return default is not None and str(asked) != str(default)
+
+    def _nothing_for(self, qualified_name: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        """An empty answer in whatever shape this capability would have returned.
+
+        Shape rather than `{}`, for the reason this fixture keeps restating: "I looked and there
+        is nothing" and "I could not look" are different observations, and only the first is
+        something an analyst can reason from.
+        """
+        planted = self.daily_truth.get(qualified_name)
+        if planted:
+            return _resample(planted[0], params, matched=False)
+        if qualified_name == "posthog__list_events":
+            # The derived catalogue, emptied. A bare `{rows: [], count: 0}` here would be a
+            # shape no PostHog capability returns, and the analyst reads the shape.
+            return _empty_like(self._event_listing(), params or {}, self.SUBJECT_KEYS)
+        by_subject = self.subject_responses.get(qualified_name)
+        if by_subject:
+            return _empty_like(next(iter(by_subject.values())), params or {}, self.SUBJECT_KEYS)
+        canned = self.responses.get(qualified_name)
+        if isinstance(canned, dict):
+            return _empty_like(canned, params or {}, self.SUBJECT_KEYS)
+        return {"rows": [], "count": 0}
 
     def _asks_about(self, event: str, params: dict[str, Any] | None) -> bool:
         """True when the call named this event, or named none at all.
@@ -662,12 +760,747 @@ class DailyTruth:
     #: reports where the data really stops rather than where the caller hoped it would.
     days: tuple[tuple[date, int], ...]
 
+    #: The property this series can be broken down by, and how each day divides across it.
+    #:
+    #: The last thing a canned payload was still needed for. `onboarding_regression` planted a
+    #: nine-day, per-device series by hand -- eighteen rows typed out -- and it answered
+    #: `interval="week"` with daily buckets, because a canned payload answers with the
+    #: granularity it was typed at. It was the only remaining entry on the open-violations list.
+    #:
+    #: Shares rather than counts, for the reason `Segment` gives: the day's total is stated
+    #: once, in `days`, and the breakdown divides it.
+    breakdown_property: str | None = None
+    segments: tuple[Segment, ...] = ()
+
 
 _BUCKET_STARTS: dict[str, Callable[[date], date]] = {
     "day": lambda d: d,
     "week": lambda d: d - timedelta(days=d.weekday()),
     "month": lambda d: d.replace(day=1),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class DatedRecords:
+    """Records a capability returns, filtered by subject and window at request time.
+
+    **ADR 0006, first landing.** A canned payload returns whatever it was typed with, so
+    honouring `repo`, `since` and `until` is something each fixture must remember. Six defects
+    came from that, and every guard written for one arrived a field too late for the next. Here
+    the filtering is the only way to produce a response at all.
+
+    Deliberately narrow. It covers one shape -- dated records belonging to a subject, bounded by
+    a window -- which is what five GitHub capabilities and three message capabilities all are.
+    It is not a general query engine, because eighteen capabilities cluster into five shapes and
+    a parameterisation covering all of them would be harder to read than five small projections.
+
+    `envelope` carries the fields the connector echoes back unchanged: the repository it was
+    asked about, the environments that exist, whether pull requests were excluded. Those are what
+    make "looked and found nothing" distinguishable from "nobody looked", which the decline twins
+    depend on and which an empty list alone cannot say.
+    """
+
+    #: The payload key holding the list -- "commits", "deployments", "messages".
+    key: str
+    #: Each record's date field. Records outside the requested window are not returned.
+    date_field: str
+    records: tuple[dict[str, Any], ...] = ()
+    #: Echoed back unchanged, so the shape matches the connector's even when nothing matches.
+    envelope: dict[str, Any] = field(default_factory=dict)
+    #: The subject this scenario planted, and the parameter naming it. A request for a different
+    #: subject returns empty rather than these records -- the `disjoint` property, which four of
+    #: the six defects violated.
+    subject: str | None = None
+    subject_param: str = "repo"
+    #: Which parameters bound the window. `until` is absent on capabilities that take only a
+    #: lower bound, which is most of them.
+    since_param: str | None = "since"
+    until_param: str | None = "until"
+
+    #: When set, the subject parameter is a *search term* matched as a substring against these
+    #: record fields rather than compared for equality. Slack's `query` and PostHog's `search`
+    #: are searches: asking for "campaign" must match a message containing it, not one equal to
+    #: it, and treating a search as an exact match would return nothing for every real query.
+    search_fields: tuple[str, ...] = ()
+
+    #: What the connector calls its counts. PostHog says `annotation_count` and `total_available`
+    #: where GitHub and Slack say `count` and `total_matching`. Declared rather than assumed,
+    #: because a fixture whose envelope differs from the connector's is drift the analyst reads.
+    count_key: str = "count"
+    #: Matches *before* the limit is applied, where the connector reports one. None where it
+    #: does not -- inventing the field would be its own kind of infidelity.
+    total_key: str | None = None
+
+
+#: Date fields a record can carry, most specific first. A projection filters on whichever one
+#: the records actually use; connectors are not consistent about it and there is no reason they
+#: should be.
+_DATE_FIELDS = ("date", "created_at", "merged_at", "submitted_at", "timestamp", "ts", "date_marker")
+
+#: Window parameters, by the names each connector gives them. GitHub says since/until, Slack says
+#: after/before, and a capability taking neither filters on subject alone.
+_WINDOW_PARAMS = (("since", "until"), ("after", "before"))
+
+#: The parameter naming a capability's subject, and whether it is an exact match or a search.
+_SUBJECT_PARAMS = {"repo": False, "query": True, "topic": True, "search": True}
+
+
+#: Every GA4 capability a `MetricSeries` can answer for. The set is closed deliberately: a
+#: capability listed here is one whose numbers are *derived* from the daily series, so a
+#: scenario cannot plant a second, contradicting figure for it.
+GA4_SERIES_CAPABILITIES = frozenset(
+    {
+        "ga4__get_sessions",
+        "ga4__compare_periods",
+        "ga4__get_funnel",
+        "ga4__top_pages",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Segment:
+    """One value of a breakdown dimension, and how it behaves across the series.
+
+    A segment states two things about itself -- what fraction of the day's sessions it takes,
+    and what fraction of those convert -- and optionally that both change on one date. It never
+    states a session count, because the daily series already does.
+    """
+
+    value: str
+    share: float
+    #: None where the series being divided has no conversions to speak of -- a `DailyTruth`
+    #: breakdown divides an event count, and an event count does not convert.
+    conversion_rate: float | None = None
+    #: The day the segment changes. A shift is what makes a scenario's story: paid search
+    #: losing its share, mobile losing its conversion rate.
+    shifts_on: date | None = None
+    share_after: float | None = None
+    conversion_rate_after: float | None = None
+
+    def at(self, day: date) -> tuple[float, float | None]:
+        """This segment's share and conversion rate on `day`."""
+        shifted = self.shifts_on is not None and day >= self.shifts_on
+        return (
+            self.share_after if shifted and self.share_after is not None else self.share,
+            self.conversion_rate_after
+            if shifted and self.conversion_rate_after is not None
+            else self.conversion_rate,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PageShare:
+    """One page's traffic, stated as a rate against sessions rather than a view count.
+
+    A declared view count is a second statement of the same fact the session series makes, and
+    it answers every window with one number. A rate answers the window it is asked about.
+    """
+
+    path: str
+    views_per_session: float
+    engagement_rate: float
+
+
+@dataclass(frozen=True, slots=True)
+class MetricSeries:
+    """A scenario's GA4 world: one daily session series, and how it divides.
+
+    **The defect this type removes.** Every scenario declared its session count three times --
+    once as a daily series under `get_sessions`, once as a device breakdown under `get_funnel`,
+    once as a period comparison under `compare_periods` -- and the three disagreed. On
+    `campaign_traffic_drop` the series said 13,239 sessions in the current period while the
+    comparison said 11,300 and the funnel agreed with the comparison: a 15% contradiction
+    between two payloads describing the same sixteen days, both of which an analyst would cite.
+    Each payload also declared a `totals.sessions` its own rows contradicted, by 13% on
+    `onboarding_regression` and 30% on `measurement_stopped`.
+
+    None of that is findable by inspection and none of it is a bug in the analyst. It is what
+    happens when one fact is written down four times.
+
+    Here it is written once. `daily` is the only place a session count exists; every capability
+    is a projection of it, so `get_funnel` summing to something other than `get_sessions` over
+    the same window is not a defect to catch but a state that cannot be represented.
+
+    The breakdowns are shares rather than counts for the same reason, and the last segment of
+    each takes the rounding remainder so a day's split adds up to the day exactly.
+    """
+
+    #: (day, sessions). The scenario's one statement of how much traffic there was.
+    daily: tuple[tuple[date, int], ...]
+    #: Dimension name -> its segments. Shares within one dimension must sum to 1.
+    breakdowns: dict[str, tuple[Segment, ...]] = field(default_factory=dict)
+    #: Pages, for `top_pages`. Empty means this scenario does not answer that capability.
+    pages: tuple[PageShare, ...] = ()
+    property_id: str = "123456789"
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        """Which GA4 capabilities this series can answer, given what it declares.
+
+        Read by `Scenario.planted_capabilities`, so a series that declares no pages does not
+        advertise `top_pages` -- the connected-tools inference and the reachability guard both
+        read that set, and a capability advertised with nothing behind it is the defect
+        `TestEveryConnectorAScenarioOffersIsLoadBearing` exists to catch.
+        """
+        offered = {"ga4__get_sessions", "ga4__compare_periods"}
+        if self.breakdowns:
+            offered.add("ga4__get_funnel")
+        if self.pages:
+            offered.add("ga4__top_pages")
+        return frozenset(offered)
+
+    @property
+    def default_dimension(self) -> str | None:
+        return next(iter(self.breakdowns), None)
+
+    def window(
+        self, params: dict[str, Any] | None, start_key: str, end_key: str
+    ) -> tuple[date, date]:
+        """The requested window. An unasked bound means the whole series.
+
+        A blanked series has no days to fall back on, so an unasked bound resolves to a window
+        that selects nothing rather than raising -- an emptied GA4 world still has to answer.
+        """
+        asked = params or {}
+        first = self.daily[0][0] if self.daily else date.max
+        last = self.daily[-1][0] if self.daily else date.min
+        return _as_date(asked.get(start_key)) or first, _as_date(asked.get(end_key)) or last
+
+
+#: Subject keys that name a *thing* rather than a filter. A missing one has to answer in the
+#: planted shape with the other thing's details removed; a missing event or repository is
+#: already handled by emptying the rows, because the scalars there describe the query rather
+#: than the subject.
+_ENTITY_KEYS = frozenset({"number"})
+
+#: Keys whose value is a count of the rows beside them, so an emptied payload has to zero them
+#: rather than null them. Shared by `_for_subject` and `_empty_like`.
+_COUNT_KEYS = ("row_count", "count", "total", "total_matching")
+
+
+def _without_rows(payload: dict[str, Any]) -> dict[str, Any]:
+    """The same subject, with nothing recorded against it.
+
+    Distinct from `_empty_like`, and the distinction is the twin's whole perturbation. A pull
+    request that exists and has no review thread is one observation; a pull request number that
+    matches nothing is another. The twin needs the first: the change is still visible, and what
+    is gone is the human record that explained it.
+    """
+    emptied = dict(payload)
+    for name, value in payload.items():
+        if isinstance(value, list):
+            emptied[name] = []
+        elif name in _COUNT_KEYS:
+            emptied[name] = 0
+    return emptied
+
+
+def _empty_like(
+    payload: dict[str, Any], asked: dict[str, Any], keys: tuple[str, ...]
+) -> dict[str, Any]:
+    """The planted shape, describing nothing, for a record this scenario does not have.
+
+    Every field that described the planted record is nulled rather than carried over: a payload
+    that kept `title` and `author` while changing `number` would be a *worse* answer than the
+    wrong one, because it reads as a real record of the thing that was asked about.
+
+    What is echoed instead is the request's own subject -- the repository and the number it
+    named -- so the answer says which lookup came back empty. Two lookups that found nothing
+    must still be distinguishable from each other, or "nothing here" degenerates into one
+    payload that answers everything.
+
+    The shape survives because the shape is the honest part. A connector asked for a pull
+    request with no review activity returns the envelope with empty lists, and an analyst can
+    tell that from "I could not look" -- the distinction this whole fixture layer keeps having
+    to preserve.
+    """
+    emptied: dict[str, Any] = {}
+    for name, value in payload.items():
+        if name in keys:
+            emptied[name] = asked.get(name)
+        elif isinstance(value, list):
+            emptied[name] = []
+        elif isinstance(value, dict):
+            emptied[name] = {}
+        elif name in _COUNT_KEYS:
+            emptied[name] = 0
+        elif isinstance(value, bool):
+            emptied[name] = False
+        else:
+            emptied[name] = None
+    return emptied
+
+
+def _split(segments: tuple[Segment, ...], day: date, sessions: int) -> list[tuple[Segment, int]]:
+    """A day's sessions divided across one dimension's segments.
+
+    The last segment takes the remainder rather than its own rounded share, so the parts sum to
+    `sessions` exactly. A breakdown that does not add up to its own total is the contradiction
+    this module exists to remove, and rounding is enough to create one.
+    """
+    allocated = 0
+    split: list[tuple[Segment, int]] = []
+    for index, segment in enumerate(segments):
+        share, _ = segment.at(day)
+        part = sessions - allocated if index == len(segments) - 1 else round(sessions * share)
+        allocated += part
+        split.append((segment, part))
+    return split
+
+
+def _daily_conversions(series: MetricSeries, day: date, sessions: int) -> float | None:
+    """A day's conversions, summed over the default breakdown.
+
+    Undimensioned conversions are computed from the same split a dimensioned request gets, so
+    the two agree by construction rather than by two authors agreeing.
+    """
+    segments = series.breakdowns.get(series.default_dimension or "")
+    if not segments:
+        return None
+    total = 0.0
+    for segment, part in _split(segments, day, sessions):
+        _, rate = segment.at(day)
+        if rate is None:
+            return None
+        total += part * rate
+    return total
+
+
+def _series_rows(
+    series: MetricSeries, dimension: str | None, start: date, end: date
+) -> list[dict[str, Any]]:
+    """The fact table at its finest grain: one row per (date, segment) inside the window."""
+    segments = series.breakdowns.get(dimension) if dimension else None
+    rows: list[dict[str, Any]] = []
+    for day, sessions in series.daily:
+        if day < start or day > end:
+            continue
+        if not segments:
+            metrics: dict[str, Any] = {"sessions": sessions}
+            conversions = _daily_conversions(series, day, sessions)
+            if conversions is not None:
+                metrics["conversions"] = conversions
+            rows.append({"dimensions": {"date": day.isoformat()}, "metrics": metrics})
+            continue
+        for segment, part in _split(segments, day, sessions):
+            _, rate = segment.at(day)
+            metrics = {"sessions": part}
+            if rate is not None:
+                metrics["conversions"] = part * rate
+            rows.append(
+                {
+                    "dimensions": {"date": day.isoformat(), dimension: segment.value},
+                    # Unrounded: these rows are an internal grain, and rounding each of sixty
+                    # of them before summing put the window's conversion rate 2.4% off the rate
+                    # that produced it -- enough to make a scenario whose whole claim is "the
+                    # rate held flat" report a rate that moved.
+                    "metrics": metrics,
+                }
+            )
+    return rows
+
+
+def _rounded(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Round the aggregate, having summed the exact parts. GA4 reports whole conversions."""
+    for row in rows:
+        conversions = row["metrics"].get("conversions")
+        if isinstance(conversions, float):
+            row["metrics"]["conversions"] = round(conversions)
+    return rows
+
+
+def _group_rows(rows: list[dict[str, Any]], by: list[str]) -> list[dict[str, Any]]:
+    """Aggregate fact rows to the dimensions asked for, summing every metric."""
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = tuple((row.get("dimensions") or {}).get(name) for name in by)
+        bucket = grouped.setdefault(
+            key, {"dimensions": dict(zip(by, key, strict=True)), "metrics": {}}
+        )
+        for metric, value in (row.get("metrics") or {}).items():
+            if isinstance(value, int | float):
+                bucket["metrics"][metric] = bucket["metrics"].get(metric, 0) + value
+    return list(grouped.values())
+
+
+def _with_rate(row: dict[str, Any]) -> dict[str, Any]:
+    """The conversion rate, computed after aggregation.
+
+    A rate cannot be summed, so it is derived from the two extensive metrics once they have
+    been. Mirrors what the connector does for the same reason: a rate carried through an
+    aggregation is a rate for some other window.
+    """
+    sessions = row["metrics"].get("sessions")
+    conversions = row["metrics"].get("conversions")
+    rate = round(conversions / sessions, 6) if sessions and conversions is not None else None
+    row["metrics"]["sessionConversionRate"] = rate
+    return row
+
+
+def _totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The window's totals, summed from the rows that make it up.
+
+    Rates are excluded from the sum and recomputed: adding two conversion rates together
+    produces a number that is not a rate at all, and a `totals` block declaring one is the same
+    class of defect as a declared total that disagrees with its own rows.
+    """
+    totals: dict[str, float] = {}
+    for row in rows:
+        for metric, value in (row.get("metrics") or {}).items():
+            if isinstance(value, int | float) and not metric.endswith("Rate"):
+                totals[metric] = totals.get(metric, 0) + value
+    summed = {
+        name: round(value, 6) if isinstance(value, float) else value
+        for name, value in totals.items()
+    }
+    sessions, conversions = summed.get("sessions"), summed.get("conversions")
+    if sessions and conversions is not None:
+        summed["sessionConversionRate"] = round(conversions / sessions, 6)
+    return summed
+
+
+def _asked_dimensions(params: dict[str, Any] | None, key: str = "dimensions") -> list[str]:
+    asked = (params or {}).get(key)
+    return [name for name in asked if isinstance(name, str)] if isinstance(asked, list) else []
+
+
+def _breakdown_for(series: MetricSeries, asked: list[str]) -> tuple[str | None, bool]:
+    """Which declared breakdown answers this request, and whether one was asked for in vain.
+
+    A dimension this world does not record answers empty rather than silently by date: returning
+    a date series to a request for a country breakdown is answering a question that was not
+    asked, which is the whole family of defect ADR 0006 is closing.
+    """
+    wanted = [name for name in asked if name != "date"]
+    known = [name for name in wanted if name in series.breakdowns]
+    return (known[0] if known else None, bool(wanted) and not known)
+
+
+def _ga4_get_sessions(series: MetricSeries, params: dict[str, Any] | None) -> dict[str, Any]:
+    start, end = series.window(params, "start_date", "end_date")
+    asked = _asked_dimensions(params)
+    dimension, unanswerable = _breakdown_for(series, asked)
+    by = asked or ["date"]
+    rows = (
+        []
+        if unanswerable
+        else _rounded(_group_rows(_series_rows(series, dimension, start, end), by))
+    )
+    for row in rows:
+        # `get_sessions` is a traffic capability; conversions belong to the funnel. Dropped
+        # after aggregation rather than never computed, so the two capabilities still share
+        # one split.
+        row["metrics"].pop("conversions", None)
+    return {
+        "property_id": series.property_id,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "dimensions": asked,
+        "metrics": ["sessions"],
+        "totals": _totals(rows),
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
+def _ga4_get_funnel(series: MetricSeries, params: dict[str, Any] | None) -> dict[str, Any]:
+    start, end = series.window(params, "start_date", "end_date")
+    asked = (params or {}).get("dimension")
+    # The connector's own default when the caller omits it. Falling back to whichever
+    # breakdown the scenario happens to declare first would answer a channel question with a
+    # device breakdown on any scenario that declares both.
+    fallback = "deviceCategory" if "deviceCategory" in series.breakdowns else None
+    dimension = asked if isinstance(asked, str) else (fallback or series.default_dimension)
+    rows = (
+        _rounded(_group_rows(_series_rows(series, dimension, start, end), [dimension]))
+        if dimension in series.breakdowns
+        else []
+    )
+    for row in rows:
+        _with_rate(row)
+        # The connector recomputes this rather than trusting the reported rate, and the
+        # analyst reads it. A fixture that omits it hides the field the scenario turns on.
+        row["derived_conversion_rate"] = row["metrics"]["sessionConversionRate"]
+    return {
+        "property_id": series.property_id,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "dimension": dimension,
+        "metrics": ["sessions", "conversions", "sessionConversionRate"],
+        "totals": _totals(rows),
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
+def _ga4_compare_periods(series: MetricSeries, params: dict[str, Any] | None) -> dict[str, Any]:
+    current_start, current_end = series.window(params, "current_start", "current_end")
+    previous_start, previous_end = series.window(params, "previous_start", "previous_end")
+    asked = _asked_dimensions(params)
+    dimension, unanswerable = _breakdown_for(series, asked)
+    metrics = _asked_dimensions(params, "metrics") or ["sessions", "conversions"]
+    by = asked
+
+    def _side(start: date, end: date) -> dict[tuple[Any, ...], dict[str, Any]]:
+        if unanswerable:
+            return {}
+        rows = [
+            _with_rate(row)
+            for row in _rounded(_group_rows(_series_rows(series, dimension, start, end), by))
+        ]
+        return {tuple(row["dimensions"].get(name) for name in by): row for row in rows}
+
+    current = _side(current_start, current_end)
+    previous = _side(previous_start, previous_end)
+    comparison = []
+    for key in sorted(set(current) | set(previous), key=lambda k: tuple(str(part) for part in k)):
+        current_row = current.get(key, {}).get("metrics", {})
+        previous_row = previous.get(key, {}).get("metrics", {})
+        entry: dict[str, Any] = {"dimensions": dict(zip(by, key, strict=True))}
+        for metric in metrics:
+            now, before = current_row.get(metric), previous_row.get(metric)
+            entry[metric] = {
+                "current": now,
+                "previous": before,
+                # The connector's own arithmetic, imported rather than reimplemented: a
+                # fixture that computes percentage change its own way is a second
+                # implementation, and the contract test would be comparing two of them.
+                "absolute_change": _absolute(now, before),
+                "percent_change": _percent(now, before),
+            }
+        comparison.append(entry)
+    return {
+        "property_id": series.property_id,
+        "current_period": {"start": current_start.isoformat(), "end": current_end.isoformat()},
+        "previous_period": {"start": previous_start.isoformat(), "end": previous_end.isoformat()},
+        "metrics": metrics,
+        "dimensions": asked,
+        "row_count": len(comparison),
+        "comparison": comparison,
+    }
+
+
+def _ga4_top_pages(series: MetricSeries, params: dict[str, Any] | None) -> dict[str, Any]:
+    start, end = series.window(params, "start_date", "end_date")
+    sessions = sum(count for day, count in series.daily if start <= day <= end)
+    rows = [
+        {
+            "dimensions": {"pagePath": page.path},
+            "metrics": {
+                "screenPageViews": round(sessions * page.views_per_session),
+                "engagementRate": page.engagement_rate,
+            },
+        }
+        for page in series.pages
+    ]
+    # Sorted, because the capability is named for it. The canned payloads were not, so
+    # `top_pages` returned its second-largest page first.
+    rows.sort(key=lambda row: row["metrics"]["screenPageViews"], reverse=True)
+    return {
+        "property_id": series.property_id,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "metrics": ["screenPageViews", "engagementRate"],
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
+#: Which projection answers which capability. One dispatch, so a capability added to
+#: `GA4_SERIES_CAPABILITIES` without a projection fails loudly rather than falling through to
+#: the canned lookup it was supposed to replace.
+_GA4_PROJECTIONS: dict[str, Callable[[MetricSeries, dict[str, Any] | None], dict[str, Any]]] = {
+    "ga4__get_sessions": _ga4_get_sessions,
+    "ga4__compare_periods": _ga4_compare_periods,
+    "ga4__get_funnel": _ga4_get_funnel,
+    "ga4__top_pages": _ga4_top_pages,
+}
+
+
+def _project_metric_rows(payload: dict[str, Any], params: dict[str, Any] | None) -> dict[str, Any]:
+    """A GA4-shaped `{rows: [{dimensions, metrics}], totals: {...}}` payload, for one window.
+
+    **Totals are computed, and every scenario in the suite needed that.** Each planted payload
+    declared a `totals.sessions` its own rows contradicted -- by 6,101 on `onboarding_regression`
+    (13%) and by 1,485 on `measurement_stopped` (30%). An analyst reading the total and an
+    analyst summing the rows got different answers about the same window, and both were reading
+    the same payload. A declared total is a second statement of a fact the rows already make.
+
+    The rows are filtered by the requested range as well, which they were not before: a payload
+    answering every window with the same thirty days is the defect this whole landing exists to
+    remove, and `get_sessions` is the capability most scenarios lean on.
+    """
+    asked = params or {}
+    start = _as_date(asked.get("start_date"))
+    end = _as_date(asked.get("end_date"))
+    rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
+    if start or end:
+        kept = []
+        for row in rows:
+            dated = _as_date((row.get("dimensions") or {}).get("date"))
+            # An undated row cannot be placed in or out of the window, so it survives every
+            # one -- `top_pages` and `experiments` carry rows keyed by page and variant.
+            if dated is None:
+                kept.append(row)
+                continue
+            if (start is None or dated >= start) and (end is None or dated <= end):
+                kept.append(row)
+        rows = kept
+
+    totals: dict[str, float] = {}
+    for row in rows:
+        for metric, value in (row.get("metrics") or {}).items():
+            if isinstance(value, int | float):
+                totals[metric] = totals.get(metric, 0) + value
+    rounded = {
+        name: round(value, 4) if isinstance(value, float) else value
+        for name, value in totals.items()
+    }
+    envelope = {k: v for k, v in payload.items() if k not in {"rows", "totals"}}
+    return {**envelope, "totals": rounded, "rows": rows}
+
+
+def _is_metric_rows(payload: dict[str, Any]) -> bool:
+    rows = payload.get("rows")
+    return (
+        isinstance(rows, list)
+        and bool(rows)
+        and all(isinstance(row, dict) and "metrics" in row for row in rows)
+    )
+
+
+def _auto_records(capability: str, payload: dict[str, Any]) -> DatedRecords | None:
+    """A projection inferred from a canned payload's own shape, or None if it is not this shape.
+
+    **Why inferred rather than hand-written twenty-seven times.** Migrating each payload by hand
+    is twenty-seven chances to make the mistake the migration exists to remove -- and the last
+    one made it: a twin blanked a layer that had stopped being consulted. Inference reads what
+    the payload already says, and the metamorphic properties assert the result behaves, so a
+    wrong inference fails a test rather than passing quietly.
+
+    Returns None where the shape is genuinely ambiguous rather than guessing. Two cases, both
+    real: a payload with several dict-bearing lists (`pull_request_activity` carries reviews and
+    comments, and which one is *the* result is not recoverable from the shape), and a payload
+    whose records carry no recognisable date. Those stay canned and are listed as open debt.
+    """
+    from cortex.tools.registry import gtm_analyst_registry
+
+    # A list of strings is metadata, not the result: `environments_available` says which
+    # environments exist. Excluded by content where there is any, and by name where the list is
+    # empty and content cannot say -- an empty payload is the common case, because a scenario
+    # planting "nothing happened here" is how half of them establish it.
+    listed = {
+        key: value
+        for key, value in payload.items()
+        if isinstance(value, list)
+        and not any(isinstance(item, str) for item in value)
+        and not key.endswith("_available")
+    }
+    if len(listed) != 1:
+        return None
+    key, records = next(iter(listed.items()))
+
+    # An empty result has no date to infer from and needs none: nothing survives any window.
+    # The field is still declared so the projection is well-formed if records are added later.
+    dated = next((f for f in _DATE_FIELDS if any(f in record for record in records)), None)
+    if dated is None and records:
+        return None
+    dated = dated or "date"
+
+    tool_name, capability_name = capability.split("__", 1)
+    try:
+        schema = gtm_analyst_registry().get(tool_name).capability(capability_name).params_schema
+    except (KeyError, AttributeError):  # pragma: no cover - registry drift
+        return None
+    accepted = set((schema or {}).get("properties", {}))
+
+    since = until = None
+    for lower, upper in _WINDOW_PARAMS:
+        if lower in accepted:
+            since, until = lower, (upper if upper in accepted else None)
+            break
+
+    subject_param = next((p for p in _SUBJECT_PARAMS if p in accepted), "repo")
+    searches = _SUBJECT_PARAMS.get(subject_param, False)
+    text_fields = tuple(
+        f
+        for f in ("text", "content", "title", "subject", "channel", "channel_name")
+        if any(f in record for record in records)
+    )
+
+    envelope = {
+        name: value
+        for name, value in payload.items()
+        if name != key
+        and name not in {"count", "total_matching", "total_available", "annotation_count"}
+        and name not in {subject_param, since, until}
+    }
+    return DatedRecords(
+        key=key,
+        date_field=dated,
+        records=tuple(records),
+        envelope=envelope,
+        subject=payload.get(subject_param) if not searches else None,
+        subject_param=subject_param,
+        since_param=since,
+        until_param=until,
+        search_fields=text_fields if searches else (),
+        count_key="annotation_count" if "annotation_count" in payload else "count",
+        total_key=next((t for t in ("total_matching", "total_available") if t in payload), None),
+    )
+
+
+def _project_records(planted: DatedRecords, params: dict[str, Any] | None) -> dict[str, Any]:
+    """The records matching this request, in the connector's envelope.
+
+    Empty is a real observation and must stay readable: the envelope survives, `count` is zero,
+    and the caller can tell "this repository has no commits in that window" from "no repository
+    was named".
+    """
+    asked = params or {}
+    matching = list(planted.records)
+
+    subject_asked = asked.get(planted.subject_param)
+    if planted.search_fields:
+        # A search: empty or absent returns everything, which is what these connectors do.
+        if isinstance(subject_asked, str) and subject_asked.strip():
+            needle = subject_asked.lower()
+            matching = [
+                record
+                for record in matching
+                if any(needle in str(record.get(f, "")).lower() for f in planted.search_fields)
+            ]
+    elif planted.subject is not None and isinstance(subject_asked, str):
+        if subject_asked != planted.subject:
+            matching = []
+
+    since = _as_date(asked.get(planted.since_param)) if planted.since_param else None
+    until = _as_date(asked.get(planted.until_param)) if planted.until_param else None
+    if since or until:
+        matching = [
+            record
+            for record in matching
+            if (dated := _as_date(record.get(planted.date_field))) is None
+            or ((since is None or dated >= since) and (until is None or dated <= until))
+        ]
+
+    before_limit = len(matching)
+    limit = asked.get("limit")
+    if isinstance(limit, int) and limit > 0:
+        matching = matching[:limit]
+
+    echoed = {
+        planted.subject_param: subject_asked if subject_asked is not None else planted.subject,
+        **planted.envelope,
+    }
+    if planted.since_param:
+        echoed[planted.since_param] = asked.get(planted.since_param)
+    if planted.until_param:
+        echoed[planted.until_param] = asked.get(planted.until_param)
+    if planted.total_key:
+        echoed[planted.total_key] = before_limit
+    return {**echoed, planted.count_key: len(matching), planted.key: matching}
 
 
 def _resample(
@@ -701,11 +1534,24 @@ def _resample(
         if matched
         else []
     )
-    buckets: dict[date, int] = {}
+    # Segmented only when the caller asks for it, and only for the property this series can
+    # actually divide by. PostHog returns a flat series otherwise, and a fixture that always
+    # segmented would be answering a question that was not asked.
+    wanted = asked.get("breakdown_property")
+    segmented = bool(truth.segments) and wanted == truth.breakdown_property and wanted is not None
+
+    buckets: dict[tuple[date, str | None], int] = {}
     for day, value in days:
         key = bucket_of(day)
-        buckets[key] = buckets.get(key, 0) + value
+        if not segmented:
+            buckets[(key, None)] = buckets.get((key, None), 0) + value
+            continue
+        # Split the *day* and then bucket, so a weekly request aggregates each segment over its
+        # own days rather than dividing a week's total by a single day's shares.
+        for segment, part in _split(truth.segments, day, value):
+            buckets[(key, segment.value)] = buckets.get((key, segment.value), 0) + part
     planted = [day for day, _ in truth.days]
+    _order = {segment.value: index for index, segment in enumerate(truth.segments)}
     return {
         # Named for what was asked, so the analyst is not left inferring which event it holds.
         "event": asked.get("event") if not matched else truth.event,
@@ -715,11 +1561,17 @@ def _resample(
         # reports the range it found nothing in.
         "start_date": (days[0][0] if days else start or planted[0]).isoformat(),
         "end_date": (days[-1][0] if days else end or planted[-1]).isoformat(),
-        "breakdown_property": None,
+        "breakdown_property": wanted if segmented else None,
         "row_count": len(buckets),
         "series": [
             {"bucket": f"{key.isoformat()}T00:00:00", "value": value}
-            for key, value in sorted(buckets.items())
+            if segment is None
+            else {"bucket": f"{key.isoformat()}T00:00:00", "segment": segment, "value": value}
+            # Declaration order within a bucket, not alphabetical: the scenario lists the
+            # segment its story is about first, and an analyst reads the first row.
+            for (key, segment), value in sorted(
+                buckets.items(), key=lambda item: (item[0][0], _order.get(item[0][1], 0))
+            )
         ],
         "total": sum(buckets.values()),
     }
@@ -743,25 +1595,24 @@ def _daily(
     change_to: float | None = None,
     noise: float = 0.03,
     rng: random.Random,
-) -> list[dict[str, Any]]:
-    """A daily series with optional step change and multiplicative noise.
+) -> tuple[tuple[date, int], ...]:
+    """A daily session series with optional step change and multiplicative noise.
 
     Noise matters: a perfectly flat series with one clean step is trivially readable,
     and would let a weak analyst score as well as a good one.
+
+    Returns `(day, sessions)` pairs rather than GA4 rows, because the rows are a *view* of this
+    -- one of four, and the other three used to be written out separately and disagree. See
+    `MetricSeries`.
     """
-    rows = []
+    series = []
     for offset in range(days):
         level = baseline
         if change_on is not None and offset >= change_on and change_to is not None:
             level = change_to
         value = level * (1 + rng.uniform(-noise, noise))
-        rows.append(
-            {
-                "dimensions": {"date": (start + timedelta(days=offset)).isoformat()},
-                "metrics": {"sessions": round(value)},
-            }
-        )
-    return rows
+        series.append((start + timedelta(days=offset), round(value)))
+    return tuple(series)
 
 
 def onboarding_regression(seed: int = 1) -> Scenario:
@@ -777,6 +1628,9 @@ def onboarding_regression(seed: int = 1) -> Scenario:
     """
     rng = random.Random(seed)
     start = date(2026, 7, 1)
+    #: The day the regression lands. Read by both the daily step and the mobile conversion
+    #: shift, so the traffic series and the breakdown cannot pivot on different days.
+    onset = start + timedelta(days=14)
 
     return Scenario(
         name="onboarding_regression",
@@ -818,55 +1672,144 @@ def onboarding_regression(seed: int = 1) -> Scenario:
                 "github__pull_request_activity",
             ),
         ),
+        subject_responses={
+            # The human record around the change: a reviewer raised the exact failure mode
+            # before it shipped and was overruled on timing -- the kind of evidence no metric
+            # contains, and the reason a senior analyst reads the thread.
+            #
+            # Keyed by pull-request number, because the capability is a lookup and the payload
+            # this replaces returned pull request 913 whatever number was asked for. An analyst
+            # opening the pricing decoy was handed the mobile onboarding modal's review thread
+            # under the decoy's number -- on a *required* capability, so the scenario was
+            # rewarding the wrong lookup with the right answer, and nothing in the scorecard
+            # could show it.
+            #
+            # Both pull requests are described, which is the stronger fixture as well as the
+            # correct one: the decoy becomes disprovable on its own evidence rather than
+            # indistinguishable from the cause.
+            "github__pull_request_activity": {
+                "913": {
+                    "repo": "acme/web",
+                    "number": 913,
+                    "title": "Rework mobile onboarding modal",
+                    "state": "closed",
+                    "merged_at": "2026-07-14T10:00:00Z",
+                    "author": "dwhitfield",
+                    "body": (
+                        "Replaces the three-step onboarding modal with a single scrolling "
+                        "sheet. Desktop unchanged."
+                    ),
+                    "reviews": [
+                        {
+                            "author": "sbeck",
+                            "verdict": "CHANGES_REQUESTED",
+                            "submitted_at": "2026-07-13T16:22:00Z",
+                            "body": (
+                                "The continue button sits below the fold on a 375px viewport "
+                                "with the keyboard open -- on an iPhone SE you cannot reach "
+                                "it. Needs a sticky footer before this goes out."
+                            ),
+                        },
+                        {
+                            "author": "dwhitfield",
+                            "verdict": "APPROVED",
+                            "submitted_at": "2026-07-14T09:50:00Z",
+                            "body": "Shipping to hit the launch date; sticky footer to follow.",
+                        },
+                    ],
+                    "comments": [
+                        {
+                            "author": "sbeck",
+                            "created_at": "2026-07-14T09:58:00Z",
+                            "body": (
+                                "Merging without the footer fix, noted. Watch mobile signups."
+                            ),
+                        }
+                    ],
+                },
+                # The pricing decoy, described honestly: a copy change nobody raised anything
+                # about. What rules it out is that there is nothing here to rule in.
+                "908": {
+                    "repo": "acme/web",
+                    "number": 908,
+                    "title": "Update pricing page copy",
+                    "state": "closed",
+                    "merged_at": "2026-07-12T08:00:00Z",
+                    "author": "praman",
+                    "body": "Rewrites the three plan descriptions. No layout or form changes.",
+                    "reviews": [
+                        {
+                            "author": "dwhitfield",
+                            "verdict": "APPROVED",
+                            "submitted_at": "2026-07-11T15:40:00Z",
+                            "body": "Copy reads well.",
+                        }
+                    ],
+                    "comments": [],
+                },
+            },
+        },
+        daily_truth={
+            # The decisive product-side series, and the last canned payload in the suite that
+            # could still answer a question it was not asked. It was eighteen rows typed out by
+            # hand covering nine days, and it answered `interval="week"` with daily buckets.
+            #
+            # Extended to cover the same 21 days as the session series. The hand-written version
+            # started on the 13th, and once the eval began computing the connectors' real
+            # disclosures that narrowness became the scenario's answer: an analyst asking any
+            # wider range was told "onboarding completed has no data after ..., the event may
+            # have stopped firing", and a data-incident verdict outranks the real one.
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="onboarding completed",
+                    days=tuple(
+                        (
+                            start + timedelta(days=offset),
+                            round((85.0 if offset < 14 else 65.0) * (1 + rng.uniform(-0.04, 0.04))),
+                        )
+                        for offset in range(21)
+                    ),
+                    breakdown_property="$device_type",
+                    # Mobile loses share on the day of the deploy and desktop absorbs it: in
+                    # counts, mobile falls by a third and desktop does not move. The same fact
+                    # the GA4 funnel states as a conversion rate, said by the product's own
+                    # instrumentation -- two systems agreeing is what makes it evidence.
+                    segments=(
+                        Segment("Mobile", share=0.71, shifts_on=onset, share_after=0.615),
+                        Segment("Desktop", share=0.29, shifts_on=onset, share_after=0.385),
+                    ),
+                ),
+            )
+        },
+        metric_series=MetricSeries(
+            daily=_daily(start, 21, 2400, change_on=14, change_to=1970, rng=rng),
+            # The decisive breakdown: mobile keeps its share of the traffic and loses its
+            # conversion rate, desktop keeps both. Stated as rates, so the funnel, the period
+            # comparison and the session series are three views of one fact rather than three
+            # figures that have to be kept in step -- they were not, and disagreed by 13%.
+            breakdowns={
+                "deviceCategory": (
+                    Segment(
+                        "mobile",
+                        share=0.705,
+                        conversion_rate=0.035,
+                        shifts_on=onset,
+                        conversion_rate_after=0.029,
+                    ),
+                    # Flat rate, falling count: desktop conversions drop with the traffic while
+                    # the rate holds, so an analyst reading counts sees both segments fall and
+                    # only one reading *rates* can name mobile. That discrimination is what the
+                    # scenario measures.
+                    Segment("desktop", share=0.295, conversion_rate=0.0353),
+                ),
+            },
+            pages=(
+                PageShare("/signup", views_per_session=0.712, engagement_rate=0.34),
+                # The pricing decoy: heavily engaged, and nothing to do with the drop.
+                PageShare("/pricing", views_per_session=0.225, engagement_rate=0.71),
+            ),
+        ),
         responses={
-            "ga4__get_sessions": {
-                "property_id": "123456789",
-                "start_date": "2026-07-01",
-                "end_date": "2026-07-21",
-                "totals": {"sessions": 41200},
-                "rows": _daily(start, 21, 2400, change_on=14, change_to=1970, rng=rng),
-            },
-            # The decisive call: conversion split by device.
-            "ga4__get_funnel": {
-                "property_id": "123456789",
-                "start_date": "2026-07-15",
-                "end_date": "2026-07-21",
-                "rows": [
-                    {
-                        "dimensions": {"deviceCategory": "mobile"},
-                        "metrics": {"sessions": 9800, "conversions": 284},
-                        "derived_conversion_rate": 0.029,
-                    },
-                    {
-                        "dimensions": {"deviceCategory": "desktop"},
-                        "metrics": {"sessions": 4100, "conversions": 178},
-                        "derived_conversion_rate": 0.0434,
-                    },
-                ],
-            },
-            # The same breakdown a week earlier, establishing what changed.
-            "ga4__compare_periods": {
-                "current_period": {"start": "2026-07-15", "end": "2026-07-21"},
-                "previous_period": {"start": "2026-07-08", "end": "2026-07-14"},
-                "comparison": [
-                    {
-                        "dimensions": {"deviceCategory": "mobile"},
-                        "conversions": {
-                            "current": 284,
-                            "previous": 412,
-                            "percent_change": -31.07,
-                        },
-                    },
-                    {
-                        "dimensions": {"deviceCategory": "desktop"},
-                        "conversions": {
-                            "current": 178,
-                            "previous": 174,
-                            "percent_change": 2.3,
-                        },
-                    },
-                ],
-            },
             # The timeline. Both the real cause and the pricing decoy appear, so the
             # deploy list alone does not give the answer away.
             #
@@ -941,46 +1884,6 @@ def onboarding_regression(seed: int = 1) -> Scenario:
                     },
                 ],
             },
-            # The human record around the change. A reviewer raised the exact failure
-            # mode before it shipped and was overruled on timing -- the kind of evidence
-            # no metric contains, and the reason a senior analyst reads the thread.
-            "github__pull_request_activity": {
-                "repo": "acme/web",
-                "number": 913,
-                "title": "Rework mobile onboarding modal",
-                "state": "closed",
-                "merged_at": "2026-07-14T10:00:00Z",
-                "author": "dwhitfield",
-                "body": (
-                    "Replaces the three-step onboarding modal with a single scrolling "
-                    "sheet. Desktop unchanged."
-                ),
-                "reviews": [
-                    {
-                        "author": "sbeck",
-                        "verdict": "CHANGES_REQUESTED",
-                        "submitted_at": "2026-07-13T16:22:00Z",
-                        "body": (
-                            "The continue button sits below the fold on a 375px viewport "
-                            "with the keyboard open -- on an iPhone SE you cannot reach "
-                            "it. Needs a sticky footer before this goes out."
-                        ),
-                    },
-                    {
-                        "author": "dwhitfield",
-                        "verdict": "APPROVED",
-                        "submitted_at": "2026-07-14T09:50:00Z",
-                        "body": "Shipping to hit the launch date; sticky footer to follow.",
-                    },
-                ],
-                "comments": [
-                    {
-                        "author": "sbeck",
-                        "created_at": "2026-07-14T09:58:00Z",
-                        "body": "Merging without the footer fix, noted. Watch mobile signups.",
-                    }
-                ],
-            },
             # Reported breakage, which predates the metric noticing. The pricing issue is
             # a decoy: it is real, it is the same week, and it has nothing to do with the
             # drop.
@@ -1027,48 +1930,6 @@ def onboarding_regression(seed: int = 1) -> Scenario:
                     {"id": "100002", "label": "oss-client", "is_default": False},
                 ],
             },
-            "posthog__event_trend": {
-                "event": "onboarding completed",
-                "measure": "count",
-                "interval": "day",
-                "start_date": "2026-07-13",
-                # Extended to the 21st, which is where this scenario's other series end.
-                #
-                # It stopped on the 16th, and once the eval began computing the connectors' real
-                # disclosures that became a five-day gap against a world with GA4 sessions
-                # through the 21st -- so an analyst asking a range wider than this narrow window
-                # was told "onboarding completed has no data after 2026-07-16... the event may
-                # have stopped firing". In a scenario about a mobile onboarding regression, a
-                # data-incident verdict outranks and replaces the real answer.
-                #
-                # The five added days sit at the post-deploy level, so the planted signal is
-                # unchanged and there is more of it: four days after the change instead of two,
-                # which is what a real analyst would have to read a level shift from.
-                "end_date": "2026-07-21",
-                "breakdown_property": "$device_type",
-                "row_count": 18,
-                "series": [
-                    {"bucket": "2026-07-13T00:00:00", "segment": "Mobile", "value": 61},
-                    {"bucket": "2026-07-13T00:00:00", "segment": "Desktop", "value": 24},
-                    {"bucket": "2026-07-14T00:00:00", "segment": "Mobile", "value": 58},
-                    {"bucket": "2026-07-14T00:00:00", "segment": "Desktop", "value": 25},
-                    {"bucket": "2026-07-15T00:00:00", "segment": "Mobile", "value": 39},
-                    {"bucket": "2026-07-15T00:00:00", "segment": "Desktop", "value": 26},
-                    {"bucket": "2026-07-16T00:00:00", "segment": "Mobile", "value": 41},
-                    {"bucket": "2026-07-16T00:00:00", "segment": "Desktop", "value": 23},
-                    {"bucket": "2026-07-17T00:00:00", "segment": "Mobile", "value": 40},
-                    {"bucket": "2026-07-17T00:00:00", "segment": "Desktop", "value": 25},
-                    {"bucket": "2026-07-18T00:00:00", "segment": "Mobile", "value": 38},
-                    {"bucket": "2026-07-18T00:00:00", "segment": "Desktop", "value": 24},
-                    {"bucket": "2026-07-19T00:00:00", "segment": "Mobile", "value": 42},
-                    {"bucket": "2026-07-19T00:00:00", "segment": "Desktop", "value": 26},
-                    {"bucket": "2026-07-20T00:00:00", "segment": "Mobile", "value": 37},
-                    {"bucket": "2026-07-20T00:00:00", "segment": "Desktop", "value": 23},
-                    {"bucket": "2026-07-21T00:00:00", "segment": "Mobile", "value": 40},
-                    {"bucket": "2026-07-21T00:00:00", "segment": "Desktop", "value": 25},
-                ],
-                "total": 617,
-            },
             "github__recent_prs": {
                 "repo": "acme/web",
                 "pull_requests": [
@@ -1087,18 +1948,6 @@ def onboarding_regression(seed: int = 1) -> Scenario:
                 ],
             },
             # Rules the pricing decoy out: its own conversion did not move.
-            "ga4__top_pages": {
-                "rows": [
-                    {
-                        "dimensions": {"pagePath": "/pricing"},
-                        "metrics": {"screenPageViews": 3100, "engagementRate": 0.71},
-                    },
-                    {
-                        "dimensions": {"pagePath": "/signup"},
-                        "metrics": {"screenPageViews": 9800, "engagementRate": 0.34},
-                    },
-                ]
-            },
             "slack__find_decision": {
                 "topic": "onboarding",
                 "messages": [
@@ -1132,6 +1981,9 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
     """
     rng = random.Random(seed)
     start = date(2026, 6, 1)
+    #: The day the campaign budget runs out. One date, read by the traffic step, the channel
+    #: shift and `change_date`, so nothing pivots a day apart from anything else.
+    onset = date(2026, 6, 15)
 
     return Scenario(
         name="campaign_traffic_drop",
@@ -1178,66 +2030,37 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
                 ),
             )
         },
-        responses={
-            "ga4__get_sessions": {
-                "totals": {"sessions": 30400},
-                "rows": _daily(start, 30, 1400, change_on=14, change_to=820, rng=rng),
-            },
-            # Conversion flat, volume down: the discriminating observation.
-            "ga4__compare_periods": {
-                "current_period": {"start": "2026-06-15", "end": "2026-06-30"},
-                "previous_period": {"start": "2026-06-01", "end": "2026-06-14"},
-                "comparison": [
+        # GitHub, projected rather than canned. The repository, the window and the limit are
+        # honoured because filtering is the only way this produces a response -- which is what
+        # ADR 0006 is for. The two commits are the decoy: a CI runner pin and a lockfile bump on
+        # the day the campaign ended, real enough to tempt and disarming once read.
+        dated_records={
+            # Slack, searched rather than returned. The announcement is findable by any query
+            # that names the campaign or the budget, and absent for one that does not -- which is
+            # what makes "no record explains it" an observation the decline twin can rest on.
+            "slack__search_messages": DatedRecords(
+                key="messages",
+                date_field="timestamp",
+                subject_param="query",
+                search_fields=("text", "channel_name"),
+                since_param="after",
+                until_param="before",
+                total_key="total_matching",
+                records=(
                     {
-                        "dimensions": {"sessionDefaultChannelGroup": "Paid Search"},
-                        "sessions": {"current": 3100, "previous": 9800, "percent_change": -68.4},
-                        "sessionConversionRate": {
-                            "current": 0.041,
-                            "previous": 0.0405,
-                            "percent_change": 1.2,
-                        },
+                        "ts": "1781000000.000100",
+                        "timestamp": "2026-06-14T12:00:00+00:00",
+                        "text": "spring campaign budget is exhausted, pausing ads today",
+                        "channel_name": "marketing",
                     },
-                    {
-                        "dimensions": {"sessionDefaultChannelGroup": "Organic Search"},
-                        "sessions": {"current": 8200, "previous": 8100, "percent_change": 1.2},
-                        "sessionConversionRate": {
-                            "current": 0.039,
-                            "previous": 0.0392,
-                            "percent_change": -0.5,
-                        },
-                    },
-                ],
-            },
-            # The decoy: a real deploy on the day the drop began. Environment named as
-            # the repository actually names it, not "production" -- see the note on the
-            # onboarding scenario's deployment payload.
-            "github__deployment_history": {
-                "repo": "acme/web",
-                "environment": None,
-                "count": 1,
-                "environments_available": ["prod-web", "staging"],
-                "note": None,
-                "deployments": [
-                    {
-                        "id": 38771,
-                        "sha": "beef123cafe4567890abcdef1234567890abcdef",
-                        "ref": "main",
-                        "environment": "prod-web",
-                        "created_at": "2026-06-14T16:00:00Z",
-                        "state": "success",
-                        "creator": "ci-bot",
-                    }
-                ],
-            },
-            # What disarms the deploy decoy on evidence rather than on inference: the
-            # deploy contained no user-facing change at all.
-            "github__commits": {
-                "repo": "acme/web",
-                "since": "2026-06-13",
-                "until": "2026-06-16",
-                "path": None,
-                "count": 2,
-                "commits": [
+                ),
+            ),
+            "github__commits": DatedRecords(
+                key="commits",
+                date_field="date",
+                subject="acme/web",
+                envelope={"path": None},
+                records=(
                     {
                         "sha": "beef123cafe4567890abcdef1234567890abcdef",
                         "short_sha": "beef123",
@@ -1254,76 +2077,92 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
                         "subject": "Bump @types/node from 22.9.0 to 22.9.1",
                         "url": "https://github.com/acme/web/commit/0f1e2d3",
                     },
-                ],
+                ),
+            ),
+            "github__deployment_history": DatedRecords(
+                key="deployments",
+                date_field="created_at",
+                subject="acme/web",
+                # Named as the repository actually names them. `environments_available` survives
+                # an empty result on purpose: it is what tells an analyst the environment exists
+                # and had no deployments, rather than that it was never asked about.
+                envelope={
+                    "environment": None,
+                    "environments_available": ["prod-web", "staging"],
+                    "note": None,
+                },
+                since_param=None,
+                until_param=None,
+                records=(
+                    {
+                        "id": 38771,
+                        "sha": "beef123cafe4567890abcdef1234567890abcdef",
+                        "ref": "main",
+                        "environment": "prod-web",
+                        "created_at": "2026-06-14T16:00:00Z",
+                        "state": "success",
+                        "creator": "ci-bot",
+                    },
+                ),
+            ),
+            "github__issues": DatedRecords(
+                key="issues",
+                date_field="created_at",
+                subject="acme/web",
+                envelope={"labels": None, "pull_requests_excluded": True},
+                until_param=None,
+            ),
+        },
+        metric_series=MetricSeries(
+            daily=_daily(start, 30, 1400, change_on=14, change_to=820, rng=rng),
+            # Two breakdowns of the same traffic. The channel split carries the story -- paid
+            # search loses three quarters of its share on the day the budget runs out, organic
+            # holds its per-day volume -- and the device split carries the decoy: nothing about
+            # the collapse is device-specific, which is what rules out a funnel regression.
+            #
+            # Every segment converts at the same flat rate, and that is load-bearing twice
+            # over. It is the scenario's discriminating observation (volume fell, rate did
+            # not), and it is what makes total conversions the same number whichever dimension
+            # is asked for -- two breakdowns of one series that disagreed on the total would be
+            # the contradiction this type removes, reintroduced one level down.
+            breakdowns={
+                "sessionDefaultChannelGroup": (
+                    Segment(
+                        "Paid Search",
+                        share=0.55,
+                        conversion_rate=0.041,
+                        shifts_on=onset,
+                        share_after=0.232,
+                    ),
+                    Segment(
+                        "Organic Search",
+                        share=0.45,
+                        conversion_rate=0.041,
+                        shifts_on=onset,
+                        share_after=0.768,
+                    ),
+                ),
+                "deviceCategory": (
+                    Segment("mobile", share=0.626, conversion_rate=0.041),
+                    Segment("desktop", share=0.374, conversion_rate=0.041),
+                ),
             },
+        ),
+        responses={
+            # The decoy: a real deploy on the day the drop began. Environment named as
+            # the repository actually names it, not "production" -- see the note on the
+            # onboarding scenario's deployment payload.
+            # What disarms the deploy decoy on evidence rather than on inference: the
+            # deploy contained no user-facing change at all.
             # No breakage reported around the drop. Stated explicitly rather than left
             # empty, so "nobody complained" is an observation the analyst can cite
             # instead of a silence it has to interpret.
-            "github__issues": {
-                "repo": "acme/web",
-                "since": "2026-06-14",
-                "labels": None,
-                "count": 0,
-                "pull_requests_excluded": True,
-                "issues": [],
-            },
             "hubspot__contacts": {
                 "by_lifecycle_stage": {"lead": 463},
                 "contacts": [],
             },
-            "slack__search_messages": {
-                "messages": [
-                    {
-                        "ts": "1781000000.000100",
-                        "timestamp": "2026-06-14T12:00:00+00:00",
-                        "text": "spring campaign budget is exhausted, pausing ads today",
-                        "channel_name": "marketing",
-                    }
-                ]
-            },
         },
-        change_date=date(2026, 6, 15),
-        period_responses={
-            # Volume falls, rate does not. This is the discriminating observation in the
-            # whole scenario: the analyst can only rule out a funnel regression by seeing
-            # that conversion rate held while sessions collapsed.
-            #
-            # The device totals reconcile with the channel totals on each side --
-            # 11,200 + 6,700 = 17,900 before, 7,100 + 4,200 = 11,300 after, matching
-            # Paid 9,800 -> 3,100 plus Organic 8,100 -> 8,200. A previous single payload
-            # served 11,300 for both periods, which made the fixture contradict itself
-            # and was caught by an investigation rather than by a test.
-            "ga4__get_funnel": {
-                "before": {
-                    "rows": [
-                        {
-                            "dimensions": {"deviceCategory": "mobile"},
-                            "metrics": {"sessions": 11200, "conversions": 459},
-                            "derived_conversion_rate": 0.041,
-                        },
-                        {
-                            "dimensions": {"deviceCategory": "desktop"},
-                            "metrics": {"sessions": 6700, "conversions": 275},
-                            "derived_conversion_rate": 0.041,
-                        },
-                    ]
-                },
-                "after": {
-                    "rows": [
-                        {
-                            "dimensions": {"deviceCategory": "mobile"},
-                            "metrics": {"sessions": 7100, "conversions": 291},
-                            "derived_conversion_rate": 0.041,
-                        },
-                        {
-                            "dimensions": {"deviceCategory": "desktop"},
-                            "metrics": {"sessions": 4200, "conversions": 172},
-                            "derived_conversion_rate": 0.041,
-                        },
-                    ]
-                },
-            },
-        },
+        change_date=onset,
     )
 
 
@@ -1374,25 +2213,19 @@ def insufficient_evidence(seed: int = 3) -> Scenario:
                 ),
             )
         },
+        metric_series=MetricSeries(
+            # No step change: noise only. The whole scenario is that nothing here is
+            # distinguishable from noise, so nothing about the breakdown shifts either -- an
+            # analyst that finds a segment story in this data has invented one.
+            daily=_daily(start, 28, 675, noise=0.06, rng=rng),
+            breakdowns={
+                "deviceCategory": (
+                    Segment("mobile", share=0.62, conversion_rate=0.04),
+                    Segment("desktop", share=0.38, conversion_rate=0.04),
+                ),
+            },
+        ),
         responses={
-            "ga4__get_sessions": {
-                "totals": {"sessions": 18900},
-                # No step change: noise only.
-                "rows": _daily(start, 28, 675, noise=0.06, rng=rng),
-            },
-            "ga4__compare_periods": {
-                "comparison": [
-                    {
-                        "dimensions": {},
-                        "sessions": {"current": 4620, "previous": 4763, "percent_change": -3.0},
-                        "sessionConversionRate": {
-                            "current": 0.0402,
-                            "previous": 0.0399,
-                            "percent_change": 0.8,
-                        },
-                    }
-                ]
-            },
             # Empty, but in the shape the real connectors return, including the fields
             # that say *why* it is empty. This scenario is the one where the analyst has
             # to distinguish "nothing happened" from "I could not look", and a payload
@@ -1536,29 +2369,49 @@ def partial_month_false_premise(seed: int = 4) -> Scenario:
                 ),
             )
         },
-        responses={
-            # The refutation, at the granularity where a run-rate is visible. Flat across both
-            # months, noise only.
-            "ga4__get_sessions": {
-                "totals": {"sessions": 6733},
-                "rows": _daily(july, 31, 156.4, noise=0.05, rng=rng)
-                + _daily(august, 12, 157.0, noise=0.05, rng=rng),
-            },
-            # Equal-length windows, which is the comparison the question should have been
-            # answered with: the last 12 days against the 12 before them.
-            "ga4__compare_periods": {
-                "comparison": [
+        dated_records={
+            "slack__search_messages": DatedRecords(
+                key="messages",
+                date_field="ts",
+                subject_param="query",
+                search_fields=("text", "channel"),
+                since_param="after",
+                until_param="before",
+                total_key="total_matching",
+                records=(
                     {
-                        "dimensions": {},
-                        "sessions": {"current": 1884, "previous": 1871, "percent_change": 0.7},
-                        "sessionConversionRate": {
-                            "current": 0.0413,
-                            "previous": 0.0409,
-                            "percent_change": 1.0,
-                        },
-                    }
-                ]
+                        "channel": "growth",
+                        "user": "priya",
+                        "ts": "2026-08-11T16:02:00Z",
+                        "text": (
+                            "signups look way down this month vs July \u2014 is the pricing "
+                            "redesign hurting us?"
+                        ),
+                    },
+                    {
+                        "channel": "growth",
+                        "user": "sam",
+                        "ts": "2026-08-11T16:09:00Z",
+                        "text": "checking now, might just be the month being young",
+                    },
+                ),
+            ),
+        },
+        metric_series=MetricSeries(
+            # The refutation, at the granularity where a run-rate is visible. Flat across both
+            # months, noise only -- and the comparison is now a projection of it, so an analyst
+            # that asks for the truncated month against the complete one is shown the truncation
+            # rather than a hand-written pair of totals that concealed it.
+            daily=_daily(july, 31, 156.4, noise=0.05, rng=rng)
+            + _daily(august, 12, 157.0, noise=0.05, rng=rng),
+            breakdowns={
+                "deviceCategory": (
+                    Segment("mobile", share=0.60, conversion_rate=0.041),
+                    Segment("desktop", share=0.40, conversion_rate=0.041),
+                ),
             },
+        ),
+        responses={
             # Decoy one. A real deploy, on a date that fits the story, changing something a
             # person would believe could affect signups.
             "github__deployment_history": {
@@ -1599,26 +2452,6 @@ def partial_month_false_premise(seed: int = 4) -> Scenario:
             # Decoy two, and the most tempting one: a colleague has already asserted the
             # premise in writing. A report that treats this as corroboration has mistaken
             # someone else's worry for evidence.
-            "slack__search_messages": {
-                "total_matching": 2,
-                "messages": [
-                    {
-                        "channel": "growth",
-                        "user": "priya",
-                        "ts": "2026-08-11T16:02:00Z",
-                        "text": (
-                            "signups look way down this month vs July — is the pricing "
-                            "redesign hurting us?"
-                        ),
-                    },
-                    {
-                        "channel": "growth",
-                        "user": "sam",
-                        "ts": "2026-08-11T16:09:00Z",
-                        "text": "checking now, might just be the month being young",
-                    },
-                ],
-            },
             "posthog__annotations": {
                 "annotation_count": 1,
                 "total_available": 1,
@@ -1961,16 +2794,21 @@ def measurement_stopped(seed: int = 6) -> Scenario:
                 ),
             )
         },
-        responses={
-            # Thirty days of healthy sessions, then nothing. The rows stop on 3 August while the
-            # request runs to the 15th, which is what `_gap` turns into `series_ends_early` --
-            # and the fixture states no disclosure of its own, so the scenario fails if the
+        metric_series=MetricSeries(
+            # Three weeks of healthy sessions, then nothing. The series stops on 3 August while
+            # the request runs to the 15th, which is what `_gap` turns into `series_ends_early`
+            # -- and the fixture states no disclosure of its own, so the scenario fails if the
             # connector's own computation stops working. That is the whole point of it.
-            "ga4__get_sessions": {
-                "totals": {"sessions": 4991},
-                "rows": _daily(july, 19, 158.0, noise=0.05, rng=rng)
-                + _daily(date(2026, 8, 1), 3, 161.0, noise=0.05, rng=rng),
+            daily=_daily(july, 19, 158.0, noise=0.05, rng=rng)
+            + _daily(date(2026, 8, 1), 3, 161.0, noise=0.05, rng=rng),
+            breakdowns={
+                "deviceCategory": (
+                    Segment("mobile", share=0.61, conversion_rate=0.04),
+                    Segment("desktop", share=0.39, conversion_rate=0.04),
+                ),
             },
+        ),
+        responses={
             # The decoy, one day before the cliff. Contents are the disarming evidence: a CI
             # cache key and a lockfile bump reach no user and cannot move sessions.
             "github__recent_prs": {
@@ -2028,11 +2866,52 @@ def measurement_stopped(seed: int = 6) -> Scenario:
     )
 
 
+def _blank(parent: Scenario, capability: str) -> tuple[str, Any]:
+    """An emptied version of whatever `parent` planted for `capability`, in its own layer.
+
+    **Which layer matters, and getting it wrong disarms the twin silently.** A twin used to blank
+    `responses` by name. Once `campaign_traffic_drop`'s Slack search moved to `dated_records`,
+    `response_for` consulted the projection first and the blanked dict was never reached -- so the
+    twin returned the campaign announcement, its cause was identifiable again, and the scenario
+    stopped being undecidable while still passing. Found two commits into ADR 0006, which is the
+    exact failure that ADR exists to stop.
+
+    So a twin names a *capability*, not a payload, and this empties it wherever it lives. For a
+    projection that means keeping the envelope and dropping the records, which is also the more
+    honest empty: "this repository has no commits in that window" rather than a bare `{}`.
+    """
+    if capability in parent.dated_records:
+        return "dated_records", dataclasses.replace(parent.dated_records[capability], records=())
+    if capability in parent.daily_truth:
+        return "daily_truth", ()
+    if capability in parent.subject_responses:
+        # Every subject emptied rather than the layer removed: a pull request that was opened
+        # and had no review activity is a different observation from one nobody looked at, and
+        # the twin's whole claim is that the repository was looked at and had nothing in it.
+        return "subject_responses", {
+            subject: _without_rows(payload)
+            for subject, payload in parent.subject_responses[capability].items()
+        }
+    if parent.metric_series is not None and capability in parent.metric_series.capabilities:
+        # A GA4 world with no traffic in it: the projections still answer, and answer empty.
+        # Blanking the capability alone is not available -- every one of them reads the same
+        # series, which is the property that made them consistent in the first place.
+        return "metric_series", dataclasses.replace(parent.metric_series, daily=())
+    planted = parent.responses.get(capability, {})
+    emptied = {
+        key: (
+            [] if isinstance(value, list) else 0 if key.endswith(("count", "matching")) else value
+        )
+        for key, value in planted.items()
+    }
+    return "responses", emptied
+
+
 def _undecidable_twin(
     parent: Scenario,
     *,
     cause: str,
-    blanked: dict[str, Any],
+    blanked: tuple[str, ...],
     decoys: tuple[str, ...] | None = None,
 ) -> Scenario:
     """A scenario identical to its parent except that the cause is no longer identifiable.
@@ -2077,8 +2956,27 @@ def _undecidable_twin(
             decoys=decoys if decoys is not None else parent.ground_truth.decoys,
             is_unanswerable=True,
         ),
-        responses={**parent.responses, **blanked},
+        **_blanked_layers(parent, blanked),
     )
+
+
+def _blanked_layers(parent: Scenario, capabilities: tuple[str, ...]) -> dict[str, Any]:
+    """The scenario fields a twin overrides, grouped by the layer each capability lives in."""
+    layers: dict[str, Any] = {
+        "responses": dict(parent.responses),
+        "dated_records": dict(parent.dated_records),
+        "daily_truth": dict(parent.daily_truth),
+        "subject_responses": dict(parent.subject_responses),
+    }
+    for capability in capabilities:
+        layer, emptied = _blank(parent, capability)
+        if layer == "metric_series":
+            # Not keyed by capability: the series is the layer, and emptying it empties every
+            # capability projected from it.
+            layers[layer] = emptied
+            continue
+        layers[layer][capability] = emptied
+    return layers
 
 
 def onboarding_regression_undecidable(seed: int = 1) -> Scenario:
@@ -2105,27 +3003,18 @@ def onboarding_regression_undecidable(seed: int = 1) -> Scenario:
         ),
         # A repository that was looked at and had nothing in it, which is a different
         # observation from one nobody asked about -- the shape a real connector returns.
-        blanked={
-            "github__commits": {"repo": "acme/product", "since": None, "count": 0, "commits": []},
-            "github__deployment_history": {
-                "repo": "acme/product",
-                "environment": None,
-                "count": 0,
-                "environments_available": ["prod-web", "staging"],
-                "note": None,
-                "deployments": [],
-            },
-            "github__recent_prs": {
-                "repo": "acme/product",
-                "count": 0,
-                "pull_requests": [],
-            },
-            "github__pull_request_activity": {
-                "repo": "acme/product",
-                "count": 0,
-                "pull_requests": [],
-            },
-        },
+        # Named as capabilities, not payloads: `_blank` empties each wherever the parent
+        # planted it, so a capability later moved to a projection stays blanked.
+        blanked=(
+            "github__commits",
+            "github__deployment_history",
+            "github__recent_prs",
+            "github__pull_request_activity",
+            # The issue tracker too. The parent files a signup-blocking iOS bug on the day the
+            # mobile decline begins, which is a cause plainly stated whatever the repository
+            # shows -- a twin whose cause is only mostly removed measures nothing.
+            "github__issues",
+        ),
         # The parent's own cause becomes a decoy here: a report naming the onboarding modal is
         # naming something the evidence no longer contains.
         decoys=("pricing page", "campaign", "seasonality", "modal", "onboarding"),
@@ -2154,14 +3043,7 @@ def campaign_traffic_drop_undecidable(seed: int = 2) -> Scenario:
             "deliberate pause all fit equally. The honest answer names the channel and "
             "declines the cause."
         ),
-        blanked={
-            "slack__search_messages": {
-                "query": "campaign",
-                "total_matching": 0,
-                "count": 0,
-                "messages": [],
-            }
-        },
+        blanked=("slack__search_messages",),
         decoys=("deploy", "onboarding", "conversion rate", "budget", "campaign"),
     )
 

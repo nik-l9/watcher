@@ -573,3 +573,40 @@ class TestANegationElsewhereDoesNotExcuseAnAssertion:
             "Code changes were limited to a dependency bump, ruling out a deploy regression, "
             "and the campaign ending caused the fall."
         )
+
+
+class TestAPlainCausalAssertionIsCaught:
+    """ "The most likely proximate cause is a signup-blocking UI bug" scanned as *not* causal.
+
+    `_CAUSAL_MARKERS` carried "cause of" and "root cause" and not the copula, so a report naming
+    a cause in the most ordinary English form available scored as having declined — and the
+    sufficiency gate would not have fired on it either, since `is_causal_claim` is what decides
+    whether the gate is called at all.
+
+    Found in a decline-twin report, which is the point of having twins: the parent scenarios
+    never phrased it this way.
+    """
+
+    ASSERTIONS = (
+        "The most likely proximate cause is a signup-blocking UI bug on iOS 18 Safari.",
+        "The primary cause is the campaign ending on 14 June.",
+        "The cause was the onboarding modal change shipped in PR 913.",
+        "The culprit is the paid-search budget running out.",
+        "The main cause is a measurement break rather than a demand drop.",
+    )
+
+    @pytest.mark.parametrize("text", ASSERTIONS)
+    def test_the_copula_forms_are_causal(self, text: str) -> None:
+        assert is_causal_claim(text), text
+
+    DECLINES = (
+        "No cause could be established from the evidence gathered.",
+        "The data cannot establish a cause.",
+        "Signups fell 18% last week.",
+    )
+
+    @pytest.mark.parametrize("text", DECLINES)
+    def test_declining_still_reads_as_declining(self, text: str) -> None:
+        """Widening the marker list must not start catching the refusals, which is the failure
+        that made the gate withhold the analyst's own eliminations."""
+        assert not is_causal_claim(text), text
