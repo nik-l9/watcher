@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import random
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -205,13 +206,29 @@ DISCOVERY_DEFAULTS: dict[str, Any] = {
         "default_project": "100001",
         "projects": [{"id": "100001", "label": "product", "is_default": True}],
     },
+    # The generic catalogue, for a scenario that does not plant its own. Three decoys, and none
+    # of them is a rival name for the event the scenario plants.
+    #
+    # **`signup_completed` used to be the first entry and it cost real quality.** Every scenario
+    # here asks about signups and every one plants `user signed up`, so the catalogue was offering
+    # a *better-looking* name for the metric being asked about, attached to nothing. The analyst
+    # queried it first every time -- reasonably -- got zero rows, and reported that the primary
+    # signup event had returned no data for the whole period: a data incident that does not exist.
+    # On `campaign_traffic_drop` that produced four claims retained at reduced confidence, a
+    # sufficiency warning saying the evidence "doesn't clearly show a signup drop at all", and a
+    # data-quality note about a pipeline that is fine, on a run that otherwise named the cause
+    # exactly. On `partial_month_false_premise` it went further and cost the accuracy gate: the
+    # analyst hedged the premise to `unverifiable` because "the signup event used in the
+    # platform's canonical funnel returned zero data for the whole period".
+    #
+    # A trial start and a checkout are near misses an analyst still has to think about. They are
+    # not impostors for the same fact, which is the difference between a decoy and a landmine.
     "posthog__list_events": {
-        "count": 4,
+        "count": 3,
         "events": [
-            {"name": "signup_completed", "last_seen_at": "2026-07-16T10:00:00Z"},
+            {"name": "trial_started", "last_seen_at": "2026-07-16T10:00:00Z"},
             {"name": "checkout_started", "last_seen_at": "2026-07-16T10:00:00Z"},
             {"name": "$pageview", "last_seen_at": "2026-07-16T10:00:00Z"},
-            {"name": "trial_started", "last_seen_at": "2026-07-16T10:00:00Z"},
         ],
     },
     "bigquery__list_queries": {
@@ -638,17 +655,28 @@ class Scenario:
         `tempting_coincidence` deliberately ships ninety-six events whose one visible cluster is
         *not* the answer to its question.
         """
-        base = (
-            self.responses.get("posthog__list_events") or DISCOVERY_DEFAULTS["posthog__list_events"]
-        )
+        planted = self.responses.get("posthog__list_events")
+        base = planted or DISCOVERY_DEFAULTS["posthog__list_events"]
         events = list(base.get("events") or [])
+        if planted is None and self.as_of is not None:
+            # The generic catalogue carries one hardcoded date, so on every scenario whose world
+            # ends earlier it advertised events that last fired *after* the data runs out --
+            # 16 July on a scenario ending 30 June, and on one ending 28 May. `last_seen_at` is
+            # the field an analyst reads to decide which event is live, and this made every decoy
+            # look more recent than the event that has the data.
+            #
+            # A scenario that plants its own catalogue is left alone: `tempting_coincidence`
+            # dates ninety-six events deliberately and the cluster among them is its whole
+            # subject.
+            events = [
+                {**event, "last_seen_at": _last_seen(self.as_of, str(event.get("name") or ""))}
+                for event in events
+            ]
         advertised = {event.get("name") for event in events}
-        last_seen = f"{self.as_of.isoformat()}T00:00:00Z" if self.as_of else ""
         for name in sorted(self.events_described() - advertised):
-            # Dated from the scenario's own horizon rather than left blank: `last_seen_at` is a
-            # field the analyst reads to decide whether an event is live, and a blank one reads
-            # as "never seen" -- which would make the planted event look like the dead option.
-            events.append({"name": name, "last_seen_at": last_seen})
+            # Dated from the scenario's own horizon rather than left blank: a blank reads as
+            # "never seen", which would make the planted event look like the dead option.
+            events.append({"name": name, "last_seen_at": _last_seen(self.as_of, name, live=True)})
         return {**base, "count": len(events), "events": events}
 
     def events_described(self) -> frozenset[str]:
@@ -984,6 +1012,36 @@ def _empty_like(
         else:
             emptied[name] = None
     return emptied
+
+
+def _last_seen(horizon: date | None, name: str, *, live: bool = False) -> str:
+    """When a catalogue says an event last fired, on the last day the scenario's world has data.
+
+    The time of day is spread across that day by the event's own name rather than fixed, and
+    neither of the two things this does is cosmetic.
+
+    A catalogue in which every event last fired at exactly midnight reads as a *synchronised
+    pipeline stop* -- the other misreading this field keeps inviting, and `measurement_stopped`
+    exists to make one real instance of it findable. A live project reports each event a few
+    hours apart.
+
+    And an event the scenario can actually answer for is dated in the evening, after the decoys.
+    Spreading everything through one window put `campaign_traffic_drop`'s planted `user signed
+    up` at 09:54 with all three decoys later, so the answerable event looked like the stalest
+    thing in the catalogue -- the same defect as the impostor name, in miniature. An analyst
+    picks the live event by recency because that is what the field is for, so the live one has
+    to be the most recent.
+
+    Deterministic in the name, so a catalogue does not change between runs.
+    """
+    if horizon is None:
+        return ""
+    first, span = (18, 5 * 60) if live else (5, 12 * 60)
+    minutes = sum(ord(character) for character in name) % span
+    stamp = datetime(horizon.year, horizon.month, horizon.day, first, 0, tzinfo=UTC) + timedelta(
+        minutes=minutes
+    )
+    return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _split(segments: tuple[Segment, ...], day: date, sessions: int) -> list[tuple[Segment, int]]:
@@ -1353,6 +1411,61 @@ def _auto_records(capability: str, payload: dict[str, Any]) -> DatedRecords | No
     )
 
 
+def _matches_search(query: str, record: dict[str, Any], fields: tuple[str, ...]) -> bool:
+    """Whether a record answers a search, matched by terms rather than as one string.
+
+    **Substring matching was impersonating search, and it cost a scenario its cause.**
+    `campaign_traffic_drop` plants one Slack message -- *"spring campaign budget is exhausted,
+    pausing ads today"* -- and the whole query string had to appear in it contiguously. So
+    `budget exhausted` found nothing, because the message says "budget **is** exhausted". An
+    investigation made four Slack searches, every one came back empty, and the sufficiency gate
+    correctly withheld the cause on the grounds that no dated record explained why paid search
+    stopped. The record was there. The fixture was answering "is this exact phrase present?" to
+    a question that asked "which messages are about these terms?".
+
+    Every term must appear, which is what a real search connector does and what keeps the search
+    a real step: a query of unrelated words still returns nothing, so the planted message is
+    findable rather than handed over.
+    """
+    haystack = " ".join(str(record.get(field, "")) for field in fields).lower()
+    words = {_stem(word) for word in re.split(r"[^\w]+", haystack) if word}
+    terms = [term for term in re.split(r"[^\w]+", query.lower()) if term]
+    return all(_matches_term(term, haystack, words) for term in terms) if terms else True
+
+
+#: How much of two words has to agree before they count as the same word. Four characters, which
+#: is enough to separate "pause"/"pausing" from "pause"/"paid".
+_ROOT = 4
+
+
+def _matches_term(term: str, haystack: str, words: set[str]) -> bool:
+    """Whether one search term is answered by a record's text.
+
+    Slack's own search stems, and this fixture stands in for Slack's search -- so "ads paused"
+    against a message reading "pausing ads today" has to match, or the fixture is stricter than
+    the thing it simulates and the difference shows up as evidence that does not exist.
+
+    Stemming alone was not enough: "pause" strips to "pause" and "pausing" to "paus", so the two
+    still missed each other. Either root prefixing the other is what closes that, with a
+    four-character floor so short words match exactly rather than promiscuously.
+    """
+    if term in haystack:
+        return True
+    root = _stem(term)
+    return any(
+        min(len(word), len(root)) >= _ROOT and (word.startswith(root) or root.startswith(word))
+        for word in words
+    )
+
+
+def _stem(word: str) -> str:
+    """A crude suffix strip. Length-guarded, so short words are left alone."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
 def _project_records(planted: DatedRecords, params: dict[str, Any] | None) -> dict[str, Any]:
     """The records matching this request, in the connector's envelope.
 
@@ -1367,11 +1480,10 @@ def _project_records(planted: DatedRecords, params: dict[str, Any] | None) -> di
     if planted.search_fields:
         # A search: empty or absent returns everything, which is what these connectors do.
         if isinstance(subject_asked, str) and subject_asked.strip():
-            needle = subject_asked.lower()
             matching = [
                 record
                 for record in matching
-                if any(needle in str(record.get(f, "")).lower() for f in planted.search_fields)
+                if _matches_search(subject_asked, record, planted.search_fields)
             ]
     elif planted.subject is not None and isinstance(subject_asked, str):
         if subject_asked != planted.subject:
@@ -2047,6 +2159,33 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
                 "deviceCategory": (
                     Segment("mobile", share=0.626, conversion_rate=0.041),
                     Segment("desktop", share=0.374, conversion_rate=0.041),
+                ),
+                # The campaign by name, because `campaign` is this scenario's required signal
+                # and `sessionCampaignName` is the most direct question an analyst can ask about
+                # it. Without this the breakdown came back empty -- on a scenario about a
+                # campaign -- and the name had to be inferred from the channel group instead.
+                # An investigation asked for it, got nothing, and wrote that "GA4
+                # campaign-level breakdowns returned no data", which is a statement about the
+                # fixture.
+                #
+                # The same numbers as the channel split, deliberately: this tenant's paid search
+                # traffic *is* the spring campaign, so two breakdowns describing it differently
+                # would be the contradiction `MetricSeries` exists to prevent.
+                "sessionCampaignName": (
+                    Segment(
+                        "spring-2026-brand",
+                        share=0.55,
+                        conversion_rate=0.041,
+                        shifts_on=onset,
+                        share_after=0.232,
+                    ),
+                    Segment(
+                        "(not set)",
+                        share=0.45,
+                        conversion_rate=0.041,
+                        shifts_on=onset,
+                        share_after=0.768,
+                    ),
                 ),
             },
         ),

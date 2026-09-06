@@ -274,3 +274,42 @@ supposed to have to construct. The scenario has been harder since the payload be
 projection, and its pass rate should be expected to sit below 1.0 until the analyst learns to
 normalise window lengths before comparing them. That is a real product gap, now measured instead
 of concealed.
+
+### What reading one run found that the scorecards did not
+
+Run 36 and run 37 were scorecards. Reading a single `cortex.ask` bundle afterwards found three
+more instances of the same defect family, none of which any dimension could see — because each
+one made the *analyst* look wrong rather than the fixture.
+
+**The catalogue advertised an impostor.** `signup_completed` led the generic event catalogue and
+no scenario plants it, while every scenario asks about signups and plants `user signed up`. The
+analyst queried the better-looking name first, got zero rows, and reported that the primary
+signup event had returned no data for the whole period. On `campaign_traffic_drop` that cost four
+claims to reduced confidence and a sufficiency warning saying the evidence *"doesn't clearly show
+a signup drop at all"*. On `partial_month_false_premise` it cost the accuracy gate: run 36 hedged
+the premise to `unverifiable` because *"the signup event used in the platform's canonical funnel
+returned zero data"*. With the impostor gone, that scenario scores 1.00.
+
+That catalogue also carried one hardcoded `last_seen_at`, so a scenario whose world ends 30 June
+advertised events last seen a fortnight later — every decoy more recent than the event with the
+data, in the field an analyst reads to decide what is live.
+
+**Substring matching was impersonating search.** `budget exhausted` did not match *"spring
+campaign budget is exhausted"*. Four Slack searches came back empty and the sufficiency gate
+withheld the cause because no dated record explained why paid search stopped. The record was
+there.
+
+**A scenario about a campaign could not answer a question about campaigns.**
+`sessionCampaignName` returned nothing, so the campaign had to be inferred from the channel
+group.
+
+Run 38, after all three: **8/8, `delivered_hallucinations` 0**, and the analyst now writes *"a
+Slack message from June 14 shows the spring campaign's budget was exhausted and ads were paused
+that day, one day before the signup decline began"* — naming the mechanism, not just the channel.
+
+**The lesson, which is the one this ADR keeps relearning.** A gating dimension cannot see a
+fixture that answers a question it was not asked, because the symptom is a correct analyst
+reporting what it was given. Nine metamorphic properties caught the structural cases. These three
+were caught by reading one report end to end, and that is not a substitute for the properties or
+the reverse — the properties are what stop a fixed instance from coming back, and reading a run
+is what finds the next instance.
