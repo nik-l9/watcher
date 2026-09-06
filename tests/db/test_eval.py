@@ -972,6 +972,89 @@ class TestTheSuiteCatchesBadAnalysts:
         assert outcome.card.dimension("decoy_rejection").score < 1.0
         assert outcome.card.dimension("accuracy").score < 1.0
 
+    async def test_a_decoy_blamed_in_a_heading_scores_down_too(self, session: AsyncSession) -> None:
+        """A finding's title is a conclusion by this dimension's own standard.
+
+        It carries no citations, so grounding cannot see it and the verifier has nothing to
+        judge it against — and it is the line a reader reads. A decoy named as the cause there
+        was delivered and scored 1.00.
+
+        The summary here says nothing about a cause, so only the heading can fail this. The
+        counterpart test below proves a heading that *mentions* a decoy while ruling it out is
+        still safe, which is the distinction that makes this worth filtering through
+        `is_causal_claim` rather than reading titles wholesale.
+        """
+        scenario = by_name("campaign_traffic_drop")
+
+        def _blames_in_a_heading(ids: list[uuid.UUID]) -> dict:
+            return {
+                "question": scenario.question,
+                "hypotheses": [_tested(ids[0])],
+                "executive_summary": [
+                    {"text": "Signups fell 41% from 15 June.", "evidence_ids": [str(ids[0])]}
+                ],
+                "findings": [
+                    {
+                        "title": "Signups fell because of the deploy that shipped on 14 June",
+                        "claims": [
+                            {
+                                "text": "Daily signups ran at 57/day, then 33/day.",
+                                "evidence_ids": [str(ids[0])],
+                            }
+                        ],
+                    }
+                ],
+                "confidence": "high",
+            }
+
+        llm = _ScriptedAnalyst(
+            completions=[_call("ga4__compare_periods"), _done()],
+            report_builder=_blames_in_a_heading,
+        )
+        outcome = await EvalHarness(llm=llm).run_one(session, scenario)
+
+        assert outcome.card is not None, outcome.error
+        decoys = outcome.card.dimension("decoy_rejection")
+        assert decoys.score < 1.0, decoys.detail
+        assert "deploy" in decoys.detail
+
+    async def test_a_heading_that_only_mentions_a_decoy_is_safe(
+        self, session: AsyncSession
+    ) -> None:
+        """The distinction the filter preserves. A heading reporting what a decoy did *not* do
+        is the analyst ruling it out, which is the behaviour this suite exists to reward."""
+        scenario = by_name("campaign_traffic_drop")
+
+        def _rules_out_in_a_heading(ids: list[uuid.UUID]) -> dict:
+            return {
+                "question": scenario.question,
+                "hypotheses": [_tested(ids[0])],
+                "executive_summary": [
+                    {"text": "Signups fell 41% from 15 June.", "evidence_ids": [str(ids[0])]}
+                ],
+                "findings": [
+                    {
+                        "title": "The 14 June deploy shipped no user-facing change",
+                        "claims": [
+                            {
+                                "text": "Both commits touch CI configuration only.",
+                                "evidence_ids": [str(ids[0])],
+                            }
+                        ],
+                    }
+                ],
+                "confidence": "high",
+            }
+
+        llm = _ScriptedAnalyst(
+            completions=[_call("ga4__compare_periods"), _done()],
+            report_builder=_rules_out_in_a_heading,
+        )
+        outcome = await EvalHarness(llm=llm).run_one(session, scenario)
+
+        assert outcome.card is not None, outcome.error
+        assert outcome.card.dimension("decoy_rejection").score == 1.0
+
     async def test_ruling_a_decoy_out_is_not_penalised(self, session: AsyncSession) -> None:
         """Naming a decoy in order to *dismiss* it is the behaviour we want.
 

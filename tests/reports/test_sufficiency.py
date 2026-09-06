@@ -610,3 +610,90 @@ class TestAPlainCausalAssertionIsCaught:
         """Widening the marker list must not start catching the refusals, which is the failure
         that made the gate withhold the analyst's own eliminations."""
         assert not is_causal_claim(text), text
+
+
+class TestAWithheldCauseCannotSurviveInAHeading:
+    """The third place a withheld causal story can hide, found by the first real-data run.
+
+    `causal_hypotheses` exists because a cause surviving only as a supported hypothesis has not
+    been withheld, it has been moved. A finding's *title* is the same argument one field over,
+    and worse on delivery: it is the line a reader reads, it carries no `evidence_ids`, so
+    grounding cannot see it and the verifier has nothing to judge it against.
+
+    Live, against real PostHog and GitHub data, the gate withheld the cause — *"nothing here
+    dates or documents that rename/migration"* — and the delivered report still led its findings
+    with *"the Canvas frontend 'conversation_created' event undercounts due to a consent-banner
+    and telemetry-client regression"*. Neither claim beneath that title mentioned a consent
+    banner. `delivered_hallucinations` counted zero, because titles are not claims.
+    """
+
+    LIVE_TITLE = (
+        "The Canvas frontend 'conversation_created' event undercounts due to a "
+        "consent-banner and telemetry-client regression, not falling usage"
+    )
+
+    def _insufficient(self) -> SufficiencyDecision:
+        return SufficiencyDecision(
+            needed=True,
+            ran=True,
+            sufficient=False,
+            missing=("a dated migration record for the event rename",),
+        )
+
+    def _with_finding(self, title: str, claim: str) -> InvestigationReport:
+        report = _report(summary=["Conversation volume did not fall in August 2026."])
+        return report.model_copy(
+            update={
+                "findings": [
+                    Finding(title=title, claims=[Claim(text=claim, evidence_ids=_evidence())])
+                ]
+            }
+        )
+
+    def test_the_heading_is_cut_back_to_what_it_observed(self) -> None:
+        applied = self._insufficient().apply(
+            self._with_finding(
+                self.LIVE_TITLE,
+                "The weekly count fell from 933 in the week of Aug 2 to 121 by Aug 30.",
+            )
+        )
+        title = applied.report.findings[0].title
+        assert title == "The Canvas frontend 'conversation_created' event undercounts"
+        assert not is_causal_claim(title), title
+
+    def test_the_drafted_heading_survives_in_the_rejection(self) -> None:
+        """Recorded rather than paraphrased, like every other withholding here: what the
+        analyst wrote is what a reader of the audit row needs to see."""
+        applied = self._insufficient().apply(
+            self._with_finding(self.LIVE_TITLE, "The weekly count fell from 933 to 121.")
+        )
+        titles = [r for r in applied.rejections if r.location.endswith(".title")]
+        assert len(titles) == 1
+        assert titles[0].text == self.LIVE_TITLE
+        assert "the title named a cause" in titles[0].detail
+
+    def test_a_heading_that_is_only_a_cause_falls_back_to_its_own_claim(self) -> None:
+        """Truncation can leave nothing usable. The claim beneath is grounded and, by this
+        point, non-causal — so it is the honest replacement, and it is not a sentence anybody
+        invented on the analyst's behalf."""
+        applied = self._insufficient().apply(
+            self._with_finding(
+                "Because the budget ran out", "Paid search sessions fell 74% after 15 June."
+            )
+        )
+        assert applied.report.findings[0].title == "Paid search sessions fell 74% after 15 June."
+
+    def test_a_descriptive_heading_is_left_alone(self) -> None:
+        """The gate withholds causes, not findings. A heading that reports an observation is
+        the analyst's work and must survive intact."""
+        descriptive = "Signups fell sharply and abruptly starting 15 June"
+        applied = self._insufficient().apply(
+            self._with_finding(descriptive, "Daily signups ran at 57/day, then 33/day.")
+        )
+        assert applied.report.findings[0].title == descriptive
+        assert not [r for r in applied.rejections if r.location.endswith(".title")]
+
+    def test_a_sufficient_verdict_touches_no_heading(self) -> None:
+        report = self._with_finding(self.LIVE_TITLE, "The weekly count fell from 933 to 121.")
+        applied = SufficiencyDecision(needed=True, ran=True, sufficient=True).apply(report)
+        assert applied.report is report
