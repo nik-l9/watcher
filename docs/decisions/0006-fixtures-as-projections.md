@@ -237,3 +237,40 @@ been named, and another project answers empty.
 **Where the canned payloads went.** Eighteen capabilities across eight scenarios, at the start of
 ADR 0006, every one of them a payload that answered whatever it was typed with. One is left —
 `posthog__list_projects`, a catalogue that takes no parameters and has nothing to project.
+
+### The re-baseline
+
+Run 36, immediately after the three landings, then run 37 for the two scenarios run 36 could
+not score. Together: **8/8 pass, `delivered_hallucinations` 0.**
+
+| Scenario | Overall | Note |
+|---|---|---|
+| `onboarding_regression` | 1.00 | 11/11 drafted claims survived review |
+| `campaign_traffic_drop` | 1.00 | |
+| `insufficient_evidence` | 0.99 | |
+| `partial_month_false_premise` | 0.97 | `summary_placement` 0.50 — refuted, mechanism not in the summary |
+| `tempting_coincidence` | 0.98 | |
+| `measurement_stopped` | 0.98 | |
+| `onboarding_regression_undecidable` | 0.91 | |
+| `campaign_traffic_drop_undecidable` | 0.99 | |
+
+**Two things the re-baseline itself taught, both worth more than the numbers.**
+
+Run 36 failed `onboarding_regression` with *"no response within 300s"* — an LLM timeout, from
+running the eval alongside the full test suite on one laptop. It passed at 1.00 on its own. An
+eval run competing for the machine is not a measurement.
+
+Run 36 failed `partial_month_false_premise` on accuracy: the report hedged the premise to
+`unverifiable` rather than refuting it, having compared a truncated twelve-day August against a
+complete thirty-one-day July and found conversions down 62% — which is 12/31 almost exactly, so
+the number it reported *was* the truncation. The precise mistake the scenario is named for. Run
+37 refuted the premise correctly on the same code.
+
+So: variance, not a regression. But the bundle is worth reading anyway, because the reason that
+failure was newly *possible* is the point of this ADR. The canned `compare_periods` this landing
+deleted answered every request with a pre-computed equal-length comparison — 1,884 against 1,871,
++0.7% — whatever windows were asked for. It was handing the analyst the refutation it was
+supposed to have to construct. The scenario has been harder since the payload became a
+projection, and its pass rate should be expected to sit below 1.0 until the analyst learns to
+normalise window lengths before comparing them. That is a real product gap, now measured instead
+of concealed.
