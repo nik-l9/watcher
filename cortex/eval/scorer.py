@@ -643,7 +643,29 @@ class Scorer:
         So this is a delivery dimension, not a correctness one, and it is weighted rather than
         gating -- the same treatment `actionability` and `completeness` get, and for the same
         reason: a soft score that can fail a build teaches people to distrust the build.
+
+        **It reads `report.premise` first, and skipping that step put a false statement in a
+        scorecard.** On run 36 this dimension reported *"refuted the premise in the executive
+        summary"* at 1.00 for a report whose premise verdict was `unverifiable` and whose summary
+        said "this is not confirmation of a genuine full-month decline". It scored on the strength
+        of one word: `partial` appeared in "the partial data available", one of the twelve
+        accepted alternatives, and the other requirement matched nowhere so was skipped as absent.
+        A dimension that skips what is missing and scores what is left becomes "did you use one of
+        these words early".
+
+        `accuracy` had the mirror image of this bug and fixed it the same way -- see the note
+        there about a report reading "No -- ... not a real drop" scoring 0.50 for never having
+        refuted the premise while this dimension scored it 1.00 for refuting it in the summary.
+        Two dimensions contradicting each other about one sentence was the symptom then too. The
+        structural verdict is the authority on *whether* the premise was refuted; this dimension
+        only answers *where*.
         """
+        if report.premise not in (PremiseVerdict.NONE_ASSERTED, PremiseVerdict.FALSE):
+            return Dimension(
+                name="summary_placement",
+                score=0.0,
+                detail=(f"nothing to place: the report says the premise is {report.premise.value}"),
+            )
         summary = " ".join(c.text for c in report.executive_summary).lower()
         placed: list[float] = []
         buried: list[str] = []

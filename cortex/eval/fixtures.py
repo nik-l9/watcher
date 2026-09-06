@@ -235,21 +235,6 @@ class Scenario:
     #: these instead of calling a real API.
     responses: dict[str, Any] = field(default_factory=dict)
 
-    #: Responses that must differ before and after the change, keyed by
-    #: `tool__capability` then by `"before"` / `"after"`.
-    #:
-    #: Needed because a single canned payload per capability is served to *every* call,
-    #: including two calls that ask about different periods. A live investigation asked
-    #: for the funnel on each side of the drop, received byte-identical figures, and
-    #: correctly reported that the device totals could not be reconciled with the channel
-    #: totals — a contradiction planted by the fixture, not found in the data. A scenario
-    #: about a change has to be able to answer differently on each side of it.
-    period_responses: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    #: The day the planted change takes effect. A request whose start date is on or after
-    #: this resolves to the `"after"` variant.
-    change_date: date | None = None
-
     #: Dated records a capability filters by subject and window, keyed by `tool__capability`.
     #: See `DatedRecords`. ADR 0006's first landing; the canned payloads it replaces could not
     #: honour `repo`, `since` or `until` except by remembering to.
@@ -340,9 +325,7 @@ class Scenario:
                 for day, _ in truth.days:
                     if latest is None or day > latest:
                         latest = day
-        for response in list(self.responses.values()) + [
-            variant for variants in self.period_responses.values() for variant in variants.values()
-        ]:
+        for response in self.responses.values():
             if not isinstance(response, dict):
                 continue
             for row in (response.get("series") or []) + (response.get("rows") or []):
@@ -402,7 +385,6 @@ class Scenario:
         """
         return frozenset(
             set(self.responses)
-            | set(self.period_responses)
             | set(self.subject_responses)
             | set(self.daily_truth)
             | set(self.dated_records)
@@ -438,11 +420,6 @@ class Scenario:
             # was rewarded exactly as well as one that read the listing and chose. The last
             # place in the suite where a payload answered a question it was not asked.
             return self._nothing_for(qualified_name, params)
-        variants = self.period_responses.get(qualified_name)
-        if variants:
-            return variants["after" if self._is_after(params) else "before"]
-        # Subject before period: a scenario planting several series wants the one that was asked
-        # for, and only a scenario planting *one* has a before/after to choose between.
         by_subject = self.subject_responses.get(qualified_name)
         if by_subject and params:
             for key in self.SUBJECT_KEYS:
@@ -480,8 +457,6 @@ class Scenario:
             # hand still honours its parameters. Explicit `dated_records` wins where both exist.
             planted_payload = self.responses.get(qualified_name)
             if isinstance(planted_payload, dict):
-                if _is_metric_rows(planted_payload):
-                    return _project_metric_rows(planted_payload, params)
                 records = _auto_records(qualified_name, planted_payload)
         if records is not None:
             return _project_records(records, params)
@@ -687,19 +662,11 @@ class Scenario:
         list to stay complete.
         """
         found = set()
-        sources = (
-            list(self.responses.values())
-            + [
-                variant
-                for variants in self.period_responses.values()
-                for variant in variants.values()
-            ]
-            + [
-                payload
-                for by_subject in self.subject_responses.values()
-                for payload in by_subject.values()
-            ]
-        )
+        sources = list(self.responses.values()) + [
+            payload
+            for by_subject in self.subject_responses.values()
+            for payload in by_subject.values()
+        ]
         for response in sources:
             if isinstance(response, dict) and isinstance(response.get("event"), str):
                 found.add(response["event"])
@@ -712,31 +679,18 @@ class Scenario:
         Public so a test can assert the invariant directly: everything described is advertised.
         """
         found = set()
-        for response in self.responses.values():
+        # Both layers that can carry a `repo`. `events_described` already read the subject
+        # layer and this did not, which is the same asymmetry that has now broken a derived
+        # invariant four times -- and the pull-request records moved into that layer today.
+        sources = list(self.responses.values()) + [
+            payload
+            for by_subject in self.subject_responses.values()
+            for payload in by_subject.values()
+        ]
+        for response in sources:
             if isinstance(response, dict) and isinstance(response.get("repo"), str):
                 found.add(response["repo"])
-        for variants in self.period_responses.values():
-            for response in variants.values():
-                if isinstance(response, dict) and isinstance(response.get("repo"), str):
-                    found.add(response["repo"])
         return frozenset(found)
-
-    def _is_after(self, params: dict[str, Any] | None) -> bool:
-        """Which side of the change a request is asking about.
-
-        Defaults to the *after* period when no date is given, matching the question:
-        an analyst asking without a range is asking about the change that prompted it.
-        """
-        if not params or self.change_date is None:
-            return True
-        for key in ("start_date", "current_start", "previous_start"):
-            raw = params.get(key)
-            if isinstance(raw, str):
-                try:
-                    return date.fromisoformat(raw) >= self.change_date
-                except ValueError:
-                    continue
-        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1316,58 +1270,6 @@ _GA4_PROJECTIONS: dict[str, Callable[[MetricSeries, dict[str, Any] | None], dict
     "ga4__get_funnel": _ga4_get_funnel,
     "ga4__top_pages": _ga4_top_pages,
 }
-
-
-def _project_metric_rows(payload: dict[str, Any], params: dict[str, Any] | None) -> dict[str, Any]:
-    """A GA4-shaped `{rows: [{dimensions, metrics}], totals: {...}}` payload, for one window.
-
-    **Totals are computed, and every scenario in the suite needed that.** Each planted payload
-    declared a `totals.sessions` its own rows contradicted -- by 6,101 on `onboarding_regression`
-    (13%) and by 1,485 on `measurement_stopped` (30%). An analyst reading the total and an
-    analyst summing the rows got different answers about the same window, and both were reading
-    the same payload. A declared total is a second statement of a fact the rows already make.
-
-    The rows are filtered by the requested range as well, which they were not before: a payload
-    answering every window with the same thirty days is the defect this whole landing exists to
-    remove, and `get_sessions` is the capability most scenarios lean on.
-    """
-    asked = params or {}
-    start = _as_date(asked.get("start_date"))
-    end = _as_date(asked.get("end_date"))
-    rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
-    if start or end:
-        kept = []
-        for row in rows:
-            dated = _as_date((row.get("dimensions") or {}).get("date"))
-            # An undated row cannot be placed in or out of the window, so it survives every
-            # one -- `top_pages` and `experiments` carry rows keyed by page and variant.
-            if dated is None:
-                kept.append(row)
-                continue
-            if (start is None or dated >= start) and (end is None or dated <= end):
-                kept.append(row)
-        rows = kept
-
-    totals: dict[str, float] = {}
-    for row in rows:
-        for metric, value in (row.get("metrics") or {}).items():
-            if isinstance(value, int | float):
-                totals[metric] = totals.get(metric, 0) + value
-    rounded = {
-        name: round(value, 4) if isinstance(value, float) else value
-        for name, value in totals.items()
-    }
-    envelope = {k: v for k, v in payload.items() if k not in {"rows", "totals"}}
-    return {**envelope, "totals": rounded, "rows": rows}
-
-
-def _is_metric_rows(payload: dict[str, Any]) -> bool:
-    rows = payload.get("rows")
-    return (
-        isinstance(rows, list)
-        and bool(rows)
-        and all(isinstance(row, dict) and "metrics" in row for row in rows)
-    )
 
 
 def _auto_records(capability: str, payload: dict[str, Any]) -> DatedRecords | None:
@@ -1981,8 +1883,8 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
     """
     rng = random.Random(seed)
     start = date(2026, 6, 1)
-    #: The day the campaign budget runs out. One date, read by the traffic step, the channel
-    #: shift and `change_date`, so nothing pivots a day apart from anything else.
+    #: The day the campaign budget runs out. One date, read by both the traffic step and the
+    #: channel shift, so the volume and the channel mix cannot pivot a day apart.
     onset = date(2026, 6, 15)
 
     return Scenario(
@@ -2162,7 +2064,6 @@ def campaign_traffic_drop(seed: int = 2) -> Scenario:
                 "contacts": [],
             },
         },
-        change_date=onset,
     )
 
 
