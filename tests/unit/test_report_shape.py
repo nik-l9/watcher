@@ -332,7 +332,20 @@ class TestThePremiseVerdictIsStatedNotInferred:
     def test_both_shapes_are_told_to_set_it(self) -> None:
         """Either kind of question can carry a premise, so the instruction cannot live on one."""
         for shape in (Shape.FACTUAL, Shape.CAUSAL):
-            assert "set `premise`" in GUIDANCE[shape], shape
+            assert "`premise`" in GUIDANCE[shape], shape
+            assert "`premise_checked`" in GUIDANCE[shape], shape
+
+    def test_both_shapes_are_told_which_order_to_answer_them_in(self) -> None:
+        """The prose has to agree with the schema, or it argues against the field order.
+
+        `premise_checked` is declared before `premise` so that a single-pass decoder writes the
+        reasoning before the verdict -- an attempt that answered the verdict first set `holds`
+        and then wrote "No -- signups did not fall". An instruction naming them the other way
+        round would be telling the model to do what the schema is arranged to prevent.
+        """
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "`premise_checked` first, then `premise`" in guidance, shape
 
 
 class TestStatingTheAssumptionRatherThanAsking:
