@@ -479,7 +479,7 @@ class TestFixtures:
 
         registry = gtm_analyst_registry()
         for scenario in SCENARIOS:
-            planted = set(scenario.responses) | set(scenario.period_responses)
+            planted = set(scenario.planted_capabilities)
             planted |= set(scenario.ground_truth.capability_names)
             for qualified in sorted(planted):
                 tool_name, _, capability = qualified.partition("__")
@@ -623,7 +623,7 @@ class TestTheSurfaceMatchesTheTenant:
         """Inferred rather than declared, so the two cannot drift. A scenario that plants a
         payload for a tool is a scenario whose tenant has that tool."""
         for scenario in SCENARIOS:
-            for qualified in set(scenario.responses) | set(scenario.period_responses):
+            for qualified in scenario.planted_capabilities:
                 assert qualified.split("__")[0] in scenario.connected_tools, qualified
 
 
@@ -1245,6 +1245,48 @@ class TestTheSuiteCatchesAConfirmedFalsePremise:
         assert placement.gates is False
         assert outcome.passed
 
+    async def test_a_hedged_premise_places_nothing(self, session: AsyncSession) -> None:
+        """The contradiction run 36 printed, and the reason this dimension reads the verdict.
+
+        A report whose premise verdict was `unverifiable`, whose summary said "this is not
+        confirmation of a genuine full-month decline", was scored 1.00 by this dimension with
+        the detail *"refuted the premise in the executive summary"*. It matched on one word --
+        `partial`, inside "the partial data available" -- while the other refutation requirement
+        matched nowhere and so was skipped as absent. A dimension that skips what is missing and
+        scores what is left measures early word choice.
+
+        `accuracy` fails the run here, correctly. What must not also happen is a second
+        dimension stating the opposite about the same sentence.
+        """
+        scenario = by_name("partial_month_false_premise")
+
+        def _hedged(ids: list[uuid.UUID]) -> dict:
+            payload = _good_report("partial_month_false_premise")(ids)
+            payload["premise"] = "unverifiable"
+            payload["executive_summary"] = [
+                {
+                    "text": (
+                        "Within the partial data available signups fell, but both series end "
+                        "shortly after, so this is not confirmation of a real decline."
+                    ),
+                    "evidence_ids": [str(ids[0])],
+                }
+            ]
+            return payload
+
+        llm = _ScriptedAnalyst(
+            completions=[*_competent_calls("partial_month_false_premise"), _done()],
+            report_builder=_hedged,
+        )
+        outcome = await EvalHarness(llm=llm).run_one(session, scenario)
+
+        assert outcome.card is not None, outcome.error
+        assert outcome.card.dimension("accuracy").score == 0.0
+        placement = outcome.card.dimension("summary_placement")
+        assert placement.score == 0.0
+        assert "unverifiable" in placement.detail, placement.detail
+        assert not outcome.passed
+
 
 class TestScorerDimensions:
     def test_grounding_and_hallucination_never_consult_a_model(self) -> None:
@@ -1658,12 +1700,12 @@ class TestNoScenarioReportsAGapItDidNotPlant:
         if not scenario.compute_disclosures:
             pytest.skip("this scenario withholds disclosures deliberately")
         for capability in ("posthog__event_trend", "ga4__get_sessions"):
-            payload = scenario.responses.get(capability)
-            if payload is None:
-                variants = scenario.period_responses.get(capability) or {}
-                payload = variants.get("after")
-            if payload is None:
+            if capability not in scenario.planted_capabilities:
                 continue
+            # The served payload, not the stored one. Both of these capabilities are
+            # projections now, and a disclosure computed over a stored dict would be measuring
+            # a payload nothing returns.
+            payload = scenario.response_for(capability, {})
             request = {
                 "start_date": "2026-05-01",
                 "end_date": probe,
@@ -2208,28 +2250,51 @@ class TestEveryPlantingFieldIsSeenByEveryDerivation:
 
     #: Every attribute a scenario can plant a capability's answer in. Adding a field here
     #: without adding it to `planted_capabilities` fails the first test below.
-    PLANTING_FIELDS = ("responses", "period_responses", "subject_responses", "daily_truth")
+    PLANTING_FIELDS = (
+        "responses",
+        "subject_responses",
+        "daily_truth",
+        "dated_records",
+        "metric_series",
+    )
+
+    #: Fields that are not a place a capability's answer can be planted, with the reason. An
+    #: exclusion list rather than an inclusion one, because the inclusion version was itself
+    #: stale: it matched field *names* ending in "responses" or "truth", so `dated_records` and
+    #: `metric_series` -- two planting fields added by ADR 0006 -- were never checked by the
+    #: class whose whole job is to check them. Now a new field has to be either wired in or
+    #: named here.
+    NOT_A_PLANTING_FIELD = {
+        "name",
+        "question",
+        "difficulty",
+        "ground_truth",
+        "compute_disclosures",
+    }
 
     def test_planted_capabilities_covers_every_planting_field(self) -> None:
         for scenario in SCENARIOS:
             for field in self.PLANTING_FIELDS:
                 planted = getattr(scenario, field)
-                missing = set(planted) - set(scenario.planted_capabilities)
+                if planted is None:
+                    continue
+                # `metric_series` is one object serving several capabilities rather than a dict
+                # keyed by them, so it says which it answers for.
+                keys = set(getattr(planted, "capabilities", None) or planted)
+                missing = keys - set(scenario.planted_capabilities)
                 assert not missing, f"{scenario.name}.{field} not seen: {sorted(missing)}"
 
     def test_the_field_list_matches_the_dataclass(self) -> None:
         """The list above is the thing that goes stale. Checked against the dataclass itself, so
-        a fifth planting field cannot be added without this failing."""
+        a sixth planting field cannot be added without this failing."""
         import dataclasses
 
         from cortex.eval.fixtures import Scenario
 
-        keyed_by_capability = {
-            f.name
-            for f in dataclasses.fields(Scenario)
-            if f.name.endswith(("responses", "truth")) and f.name != "ground_truth"
+        plantable = {
+            f.name for f in dataclasses.fields(Scenario) if f.name not in self.NOT_A_PLANTING_FIELD
         }
-        assert keyed_by_capability == set(self.PLANTING_FIELDS)
+        assert plantable == set(self.PLANTING_FIELDS)
 
     def test_a_connector_is_offered_wherever_its_answers_are_planted(self) -> None:
         """The defect itself. A scenario planting a capability whose connector is not offered has

@@ -373,12 +373,11 @@ class TestEveryGA4CapabilityAgreesAboutTheSameWindow:
         """
         from cortex.eval.fixtures import GA4_SERIES_CAPABILITIES
 
-        for scenario, _ in self._series():
-            planted = (
-                set(scenario.responses)
-                | set(scenario.period_responses)
-                | set(scenario.subject_responses)
-            )
+        # Every scenario, not only the ones declaring a series: GA4 is answered by
+        # `MetricSeries` or not at all, so a canned payload for one of these capabilities is a
+        # second implementation whether or not a series sits beside it.
+        for scenario in SCENARIOS:
+            planted = set(scenario.responses) | set(scenario.subject_responses)
             overlap = planted & GA4_SERIES_CAPABILITIES
             assert not overlap, (
                 f"{scenario.name} plants {sorted(overlap)} as a canned payload beside a "
