@@ -1153,3 +1153,191 @@ class TestTheDataTrustStateTravelsWithTheSeries:
         )
         assert "data_trust" not in result.payload
         assert "data_trust_note" not in result.payload
+
+
+class TestARenamedEventIsNamedBesideTheMovement:
+    """The failure five live attempts at one question produced, and none of them hallucinated.
+
+    Asked *did conversation volume change in August 2026*, against real PostHog data, the
+    analyst returned "it did not fall", "it fell 78%", "it rose 18x", and twice "the premise
+    does not hold" — entirely according to whether that attempt happened to query both
+    `conversation_created` and `agent_server.conversation_created`. The one attempt that read a
+    single series reported *"a confirmed level shift of about 78%"*: every figure real, every
+    citation resolving, and wrong.
+
+    No grounding mechanism can see that, because nothing is ungrounded. So the connector says
+    it, next to the movement, for the same reason `blast_radius` is fetched next to the gap —
+    the analyst has to hold both to interpret either, and in production it did not go back for
+    the second call.
+    """
+
+    #: A series with a level shift the movement check can actually confirm.
+    #:
+    #: Noisy on purpose, and that is not decoration: `describe_movement` estimates a noise
+    #: scale from the series to test a candidate shift against, so a *perfectly* clean step
+    #: from 180 to 40 has zero estimated variance and is reported as no shift at all. Every
+    #: split tried -- 15/15, 20/10, 30/14 -- found nothing until the values carried noise.
+    #: The real series that exposed this whole defect had noise, which is why it registered.
+    COLLAPSE = [
+        ["2026-08-01T00:00:00", 175],
+        ["2026-08-02T00:00:00", 170],
+        ["2026-08-03T00:00:00", 184],
+        ["2026-08-04T00:00:00", 168],
+        ["2026-08-05T00:00:00", 181],
+        ["2026-08-06T00:00:00", 176],
+        ["2026-08-07T00:00:00", 167],
+        ["2026-08-08T00:00:00", 180],
+        ["2026-08-09T00:00:00", 167],
+        ["2026-08-10T00:00:00", 178],
+        ["2026-08-11T00:00:00", 168],
+        ["2026-08-12T00:00:00", 168],
+        ["2026-08-13T00:00:00", 178],
+        ["2026-08-14T00:00:00", 189],
+        ["2026-08-15T00:00:00", 169],
+        ["2026-08-16T00:00:00", 38],
+        ["2026-08-17T00:00:00", 41],
+        ["2026-08-18T00:00:00", 43],
+        ["2026-08-19T00:00:00", 40],
+        ["2026-08-20T00:00:00", 39],
+        ["2026-08-21T00:00:00", 43],
+        ["2026-08-22T00:00:00", 37],
+        ["2026-08-23T00:00:00", 42],
+        ["2026-08-24T00:00:00", 39],
+        ["2026-08-25T00:00:00", 38],
+        ["2026-08-26T00:00:00", 38],
+        ["2026-08-27T00:00:00", 39],
+        ["2026-08-28T00:00:00", 42],
+        ["2026-08-29T00:00:00", 38],
+        ["2026-08-30T00:00:00", 41],
+    ]
+
+    async def test_the_sibling_is_named_when_the_series_moves(
+        self, tool: PostHogTool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        patch_client(
+            tool,
+            {
+                "/query/": _query_response(["bucket", "value"], self.COLLAPSE),
+                "event_definitions/": _definitions(
+                    {
+                        "conversation_created": "2026-08-28T10:00:00Z",
+                        "agent_server.conversation_created": "2026-09-06T10:00:00Z",
+                        "settings saved": "2026-09-06T10:00:00Z",
+                    }
+                ),
+            },
+            is_async_factory=True,
+        )
+        result = await tool.event_trend(
+            ctx, event="conversation_created", start_date="2026-08-01", end_date="2026-08-30"
+        )
+
+        related = result.payload["related_events"]
+        assert [entry["name"] for entry in related["events"]] == [
+            "agent_server.conversation_created"
+        ]
+        assert related["matched_on"] == ["conversation"]
+        assert "may be a movement in what is being recorded" in related["note"]
+
+    async def test_a_shared_lifecycle_verb_is_not_a_relation(
+        self, tool: PostHogTool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        """`api key created` came back "related" to `conversation_created` on the strength of
+        the word "created" alone. Almost every product event ends in a lifecycle verb, so
+        matching on one relates almost anything to anything — what makes two events candidates
+        for measuring one concept is a shared subject."""
+        patch_client(
+            tool,
+            {
+                "/query/": _query_response(["bucket", "value"], self.COLLAPSE),
+                "event_definitions/": _definitions(
+                    {
+                        "api key created": "2026-09-06T10:00:00Z",
+                        "billing portal opened": "2026-09-06T10:00:00Z",
+                        "workspace renamed": "2026-09-06T10:00:00Z",
+                    }
+                ),
+            },
+            is_async_factory=True,
+        )
+        result = await tool.event_trend(
+            ctx, event="conversation_created", start_date="2026-08-01", end_date="2026-08-28"
+        )
+
+        assert "related_events" not in result.payload
+
+    async def test_a_flat_series_costs_no_extra_request(
+        self, tool: PostHogTool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        """The cost discipline `blast_radius` established: one extra request on the calls that
+        need it and nothing on the calls that do not. A series that did not move needs no
+        sibling to interpret it."""
+        patch_client(
+            tool,
+            {
+                "/query/": _query_response(
+                    ["bucket", "value"],
+                    [[f"2026-08-{day:02d}T00:00:00", 180] for day in range(1, 31)],
+                ),
+                "event_definitions/": _definitions(
+                    {"agent_server.conversation_created": "2026-09-06T10:00:00Z"}
+                ),
+            },
+            is_async_factory=True,
+        )
+        result = await tool.event_trend(
+            ctx, event="conversation_created", start_date="2026-08-01", end_date="2026-08-30"
+        )
+
+        assert not result.payload["movement"]["level_shifts"]
+        assert "related_events" not in result.payload
+
+    async def test_a_dead_sibling_is_kept_because_a_handover_is_the_point(
+        self, tool: PostHogTool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        """The old event dies as the new one starts. A filter that dropped stale siblings would
+        drop the more informative half of a migration."""
+        patch_client(
+            tool,
+            {
+                "/query/": _query_response(["bucket", "value"], self.COLLAPSE),
+                "event_definitions/": _definitions(
+                    {"conversation_started": "2026-08-11T10:00:00Z"}
+                ),
+            },
+            is_async_factory=True,
+        )
+        result = await tool.event_trend(
+            ctx, event="conversation_created", start_date="2026-08-01", end_date="2026-08-30"
+        )
+
+        events = result.payload["related_events"]["events"]
+        assert events == [{"name": "conversation_started", "last_seen_at": "2026-08-11"}]
+
+    async def test_a_noisy_project_is_capped_rather_than_dumped(
+        self, tool: PostHogTool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        """A project with `$pageview_1` through `$pageview_84` would bury the disclosure it is
+        supposed to be. Capped, most recent first, with the true count in the note."""
+        patch_client(
+            tool,
+            {
+                "/query/": _query_response(["bucket", "value"], self.COLLAPSE),
+                "event_definitions/": _definitions(
+                    {
+                        f"conversation_variant_{n}": f"2026-08-{n:02d}T10:00:00Z"
+                        for n in range(1, 21)
+                    }
+                ),
+            },
+            is_async_factory=True,
+        )
+        result = await tool.event_trend(
+            ctx, event="conversation_created", start_date="2026-08-01", end_date="2026-08-30"
+        )
+
+        related = result.payload["related_events"]
+        assert related["count"] == 20
+        assert len(related["events"]) == 5
+        assert related["events"][0]["last_seen_at"] == "2026-08-20"
+        assert "the 5 most recent shown" in related["note"]

@@ -788,3 +788,99 @@ class TestHealthDisclosure:
             stream="issues",
         )
         assert state is not None and "billing page" in (state.detail or "")
+
+
+class TestAnOperatorIsToldWhyMemoryIsIncomplete:
+    """Both halves of one afternoon's real syncs, where the notes said nothing usable.
+
+    The `documents not stored` note existed and was empty of reason:
+    `ResponseHandlingException: `, twice, from a managed Qdrant cluster. And a sync whose
+    vector store was unreachable at *provision* time skipped the write block entirely, so every
+    stream reported `ok` with `docs=0` and `--status` showed green while the tenant had no
+    semantic memory at all.
+
+    `IngestRunner`'s own contract is that "a stream that succeeded with a note is the
+    interesting case — it means the data is real but incomplete, which is exactly what a report
+    has to disclose and what a silent success would hide". These are the two ways it was
+    hiding one.
+    """
+
+    def test_a_wrapper_with_no_message_still_names_its_cause(self) -> None:
+        """qdrant-client's wrapper sets neither `__cause__` nor `__context__` — it takes the
+        underlying exception as a constructor argument and keeps it on an attribute, so
+        following only the standard chain finds nothing and prints the bare class name."""
+        import httpx
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        from cortex.ingest.runner import _describe
+
+        described = _describe(
+            ResponseHandlingException(source=httpx.ReadTimeout("timed out reaching the cluster"))
+        )
+        assert described == (
+            "ResponseHandlingException <- ReadTimeout: timed out reaching the cluster"
+        )
+
+    def test_a_plain_exception_is_described_as_itself(self) -> None:
+        from cortex.ingest.runner import _describe
+
+        assert _describe(ValueError("collection width mismatch")) == (
+            "ValueError: collection width mismatch"
+        )
+
+    def test_a_cause_with_no_message_is_still_named(self) -> None:
+        """The floor: a class name with no message is the one thing this must not produce
+        *twice over*. An empty inner message still leaves the reader the inner class."""
+        import httpx
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        from cortex.ingest.runner import _describe
+
+        assert _describe(ResponseHandlingException(source=httpx.ConnectError(""))) == (
+            "ResponseHandlingException <- ConnectError"
+        )
+
+    async def test_a_stream_whose_documents_were_never_offered_says_so(
+        self, session: AsyncSession
+    ) -> None:
+        """Semantic memory off for the whole run, not failing per write.
+
+        This is the silent one. The header line said "semantic memory unavailable" once, the
+        streams said nothing, and `--status` — which reads the stream rows, not the console —
+        reported `ok`.
+        """
+        tenant = await _tenant(session)
+        await _connect(session, tenant)
+        graph = _FakeGraph()
+        result = StreamResult(
+            nodes=[Node(NodeLabel.PR, "913", {})],
+            documents=[
+                Document(kind="docs", source_id="x", text="a commit"),
+                Document(kind="docs", source_id="y", text="another commit"),
+            ],
+        )
+
+        outcome = await IngestRunner(graph, None).run(  # type: ignore[arg-type]
+            session, tenant, _StubSyncer({"commits": result}), now=NOW
+        )
+
+        assert outcome.succeeded is True
+        detail = outcome.streams[0].detail or ""
+        assert "2 document(s) not stored" in detail, detail
+        assert "semantic memory was unavailable" in detail, detail
+        # The graph is the core and must still be written.
+        assert len(graph.nodes) == 1
+
+    async def test_a_stream_with_no_documents_needs_no_note(self, session: AsyncSession) -> None:
+        """A note that appears whenever semantic memory is off, on streams that produced
+        nothing to store, is a note nobody reads on the sync that needed it."""
+        tenant = await _tenant(session)
+        await _connect(session, tenant)
+        graph = _FakeGraph()
+        result = StreamResult(nodes=[Node(NodeLabel.PR, "913", {})])
+
+        outcome = await IngestRunner(graph, None).run(  # type: ignore[arg-type]
+            session, tenant, _StubSyncer({"commits": result}), now=NOW
+        )
+
+        assert "not stored" not in (outcome.streams[0].detail or "")
