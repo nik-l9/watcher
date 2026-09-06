@@ -2540,3 +2540,71 @@ def _ask(scenario: Scenario, capability: str) -> dict:
     if records is not None and records.subject and not records.search_fields:
         params[records.subject_param] = records.subject
     return dict(scenario.response_for(capability, params))
+
+
+class TestTheVarianceInstrumentActuallyRuns:
+    """`--variance` had been dead since the sufficiency gate landed, and nobody knew.
+
+    `replay_bundle` grew a sixth return value; `measure_spread` still unpacked five. Every
+    invocation died on `ValueError: too many values to unpack`, so the one instrument this
+    project has for answering "how much of a score difference is the dice" produced no numbers
+    for as long as it mattered — which is why a reliability question had to be answered by
+    running the same investigation by hand five times and comparing prose.
+
+    `test_variance.py` said at the top that `measure_spread` "needs bundles and a session and is
+    exercised in tests/db/". It was not. A comment asserting coverage that does not exist is
+    worse than no comment, because it stops anyone looking. This is that test.
+    """
+
+    async def test_it_scores_captured_bundles_and_measures_their_spread(
+        self, session: AsyncSession, tmp_path
+    ) -> None:
+        from cortex.eval.variance import measure_spread
+
+        scenario = by_name("campaign_traffic_drop")
+        # Numbered, because the bundle filename carries the attempt: two `run_one` calls left
+        # at the default overwrite each other and the spread has nothing to measure.
+        for attempt in (1, 2):
+            llm = _ScriptedAnalyst(
+                completions=[*_competent_calls("campaign_traffic_drop"), _done()],
+                report_builder=_good_report("campaign_traffic_drop"),
+            )
+            outcome = await EvalHarness(llm=llm, capture_to=tmp_path).run_one(
+                session, scenario, attempt
+            )
+            assert outcome.card is not None, outcome.error
+
+        spread = await measure_spread(session, tmp_path)
+
+        assert spread.scenarios == ("campaign_traffic_drop",)
+        assert spread.attempts_per_scenario == {"campaign_traffic_drop": 2}
+        assert {d.name for d in spread.dimensions} >= {"grounding", "accuracy"}
+
+    async def test_it_reports_the_route_and_whether_the_answer_agreed(
+        self, session: AsyncSession, tmp_path
+    ) -> None:
+        """The layer arXiv 2605.28840 finds predictive, and the one it has no way to define.
+
+        Two attempts down an identical scripted route: one route, and the same answer. The
+        interesting reading is the negative — a scenario appearing under "disagreed with itself"
+        is the only variance here that is a defect.
+        """
+        from cortex.eval.variance import measure_spread, render_spread
+
+        scenario = by_name("campaign_traffic_drop")
+        for attempt in (1, 2):
+            llm = _ScriptedAnalyst(
+                completions=[*_competent_calls("campaign_traffic_drop"), _done()],
+                report_builder=_good_report("campaign_traffic_drop"),
+            )
+            await EvalHarness(llm=llm, capture_to=tmp_path).run_one(session, scenario, attempt)
+
+        spread = await measure_spread(session, tmp_path)
+
+        assert len(spread.trajectories) == 1
+        trajectory = spread.trajectories[0]
+        assert trajectory.attempts == 2
+        assert trajectory.distinct_routes == 1
+        assert trajectory.tool_sequence_similarity == 1.0
+        assert trajectory.unanimous is True
+        assert "reached the same answer on every attempt" in render_spread(spread)
