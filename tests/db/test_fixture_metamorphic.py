@@ -567,3 +567,124 @@ def _between(window: dict[str, str]) -> list[str]:
     start = date.fromisoformat(window["start_date"])
     end = date.fromisoformat(window["end_date"])
     return [(start + timedelta(days=n)).isoformat() for n in range((end - start).days + 1)]
+
+
+class TestTheCatalogueDescribesTheWorldBehindIt:
+    """Discovery must not advertise a world the rest of the fixture cannot answer for.
+
+    The repository listing and the event listing each learned this separately and are derived
+    because of it. What neither derivation covered is `last_seen_at` — the field an analyst reads
+    to decide *which* of several plausible events is the live one — and getting that wrong cost
+    real quality twice.
+
+    The generic catalogue carried one hardcoded date, 16 July, on every scenario that did not
+    plant its own. So `campaign_traffic_drop`, whose world ends 30 June, advertised three events
+    that last fired a fortnight after its data runs out, all of them more recent than the event
+    that actually has data. And it advertised `signup_completed`, a better-looking name for the
+    metric every one of these scenarios asks about, attached to nothing — so the analyst queried
+    it first, got zero rows, and reported that the primary signup event had stopped firing. On
+    `partial_month_false_premise` that hedge cost the accuracy gate.
+
+    Two mechanical invariants, which is all this needs: nothing fired after the world ended, and
+    the events that can be answered are the most recent ones in the catalogue.
+    """
+
+    def test_nothing_fired_after_the_world_ended(self) -> None:
+        checked = 0
+        for scenario in SCENARIOS:
+            if scenario.as_of is None:
+                continue
+            for event in scenario.response_for("posthog__list_events", {}).get("events") or []:
+                stamp = str(event.get("last_seen_at") or "")[:10]
+                if not stamp:
+                    continue
+                assert stamp <= scenario.as_of.isoformat(), (
+                    f"{scenario.name} advertises {event['name']!r} as last seen {stamp}, after "
+                    f"its own data ends on {scenario.as_of}. An analyst reads this field to "
+                    "decide what is live."
+                )
+                checked += 1
+        assert checked, "no catalogue checked: this property is asserting nothing"
+
+    def test_the_answerable_events_are_the_recent_ones(self) -> None:
+        """Otherwise the catalogue points away from the data.
+
+        An analyst choosing between event names picks the most recently seen, because that is
+        what the field is for. A world whose answerable event looks like its stalest is one
+        where reading the catalogue correctly leads to the wrong query.
+        """
+        checked = 0
+        for scenario in SCENARIOS:
+            events = scenario.response_for("posthog__list_events", {}).get("events") or []
+            answerable = scenario.events_described()
+            live = [e["last_seen_at"] for e in events if e.get("name") in answerable]
+            decoys = [e["last_seen_at"] for e in events if e.get("name") not in answerable]
+            if not live or not decoys:
+                continue
+            assert max(live) > max(decoys), (
+                f"{scenario.name}: every decoy in the catalogue looks more recently seen than "
+                "the event that has data."
+            )
+            checked += 1
+        assert checked, "no catalogue with both checked: this property is asserting nothing"
+
+
+class TestASearchMatchesTermsRatherThanOneString:
+    """A search capability must answer the question a search asks.
+
+    `campaign_traffic_drop` plants one Slack message — *"spring campaign budget is exhausted,
+    pausing ads today"* — and the projection required the whole query to appear in it
+    contiguously. So `budget exhausted` found nothing, because the message says "budget **is**
+    exhausted". An investigation made four Slack searches, every one came back empty, and the
+    sufficiency gate correctly withheld the cause on the grounds that no dated record explained
+    why paid search stopped. The record was there.
+
+    Same family as every other defect ADR 0006 closes: the fixture answered "is this exact
+    phrase present?" to a request that asked "which messages are about these terms?".
+
+    Both directions are asserted, because a search that matches everything is as useless as one
+    that matches nothing — and the looser it gets, the more the fixture hands over rather than
+    plants.
+    """
+
+    #: (query, whether the planted message should answer it). The negatives are the point: a
+    #: fixture that returned this message for "deploy regression" would be giving away a cause
+    #: on a scenario whose whole subject is that a deploy is *not* the cause.
+    QUERIES = (
+        ("budget exhausted", True),
+        ("campaign", True),
+        ("ads paused", True),
+        ("pause ads", True),
+        ("spring campaign budget", True),
+        ("deploy regression", False),
+        ("onboarding modal", False),
+        ("pricing page", False),
+        # Every term has to match, not any of them. Without this row the property passes
+        # against a fixture that ORs its terms -- which would return the campaign message for
+        # any query mentioning a campaign at all, including one blaming a deploy.
+        ("campaign deploy", False),
+        ("budget onboarding", False),
+    )
+
+    def test_the_planted_message_answers_what_it_is_about(self) -> None:
+        scenario = _by("campaign_traffic_drop")
+        for query, expected in self.QUERIES:
+            found = scenario.response_for(
+                "slack__search_messages", {"query": query, "after": "2026-06-01"}
+            )
+            messages = found.get("messages") or found.get("rows") or []
+            assert bool(messages) is expected, (
+                f"search for {query!r} returned {len(messages)} message(s); expected "
+                f"{'a match' if expected else 'nothing'}"
+            )
+
+    def test_an_empty_query_returns_everything(self) -> None:
+        """What the real connectors do: no query is not a query that matches nothing."""
+        scenario = _by("campaign_traffic_drop")
+        for query in ("", "   ", None):
+            found = scenario.response_for("slack__search_messages", {"query": query})
+            assert found.get("messages"), f"an empty query ({query!r}) returned nothing"
+
+
+def _by(name: str) -> Scenario:
+    return next(scenario for scenario in SCENARIOS if scenario.name == name)
