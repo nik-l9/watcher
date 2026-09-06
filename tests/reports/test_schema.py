@@ -548,3 +548,58 @@ class TestAFieldCapMustNotDiscardAnInvestigation:
             premise_checked=stated,
         )
         assert report.premise_checked == stated
+
+
+class TestAJudgementComesAfterItsInput:
+    """Field order is behaviour, not style, and this is the third time it has bitten.
+
+    Structured output is one left-to-right pass over the schema's properties, so a field placed
+    above its own inputs has to be answered before they exist. The verifier's `VERDICT_SCHEMA`
+    was reordered so `reason` precedes `verdict` after that discovery. The executive summary and
+    its confidence were moved to the end for the same reason, after four live attempts wrote
+    "placeholder" into a summary they could not yet write.
+
+    `premise` had the verdict first. A measured run of five attempts at
+    `partial_month_false_premise` showed what that produces: one emitted `premise: holds` and
+    then wrote *"No — on the days for which we actually have data, signups did not fall"*. The
+    prose refuted the premise and the field said it stood, because a one-token enum was decided
+    before a word of reasoning about it existed — and `accuracy` reads the field, so a correct
+    investigation was scored zero.
+
+    Asserted here because it is free to assert and the failure is invisible otherwise: nothing
+    about a wrongly-ordered schema fails until a live model fills it in.
+    """
+
+    #: Each pair is (input, judgement). The judgement must not be answerable before its input.
+    ORDERED_PAIRS = (
+        ("premise_checked", "premise"),
+        ("findings", "executive_summary"),
+        ("executive_summary", "confidence"),
+    )
+
+    def _properties(self) -> list[str]:
+        return list(InvestigationReport.model_json_schema()["properties"])
+
+    @pytest.mark.parametrize(("earlier", "later"), ORDERED_PAIRS)
+    def test_the_input_is_declared_before_the_judgement(self, earlier: str, later: str) -> None:
+        properties = self._properties()
+        assert properties.index(earlier) < properties.index(later), (
+            f"{later!r} is declared before {earlier!r}, so a single-pass decoder has to answer "
+            f"it before {earlier!r} exists. This is how `premise` came to contradict the "
+            "summary underneath it."
+        )
+
+    #: The only fields allowed after `confidence`, with the reason. `sources` is a list of the
+    #: evidence already cited above -- a transcription, not a judgement -- so answering it last
+    #: costs nothing. Anything else added here has to justify being answered after the summary.
+    _AFTER_THE_JUDGEMENTS = ("sources",)
+
+    def test_nothing_requiring_judgement_follows_the_confidence(self) -> None:
+        """The summary and its confidence are judgements over everything above them, so a field
+        inserted after them is a field answered after the report has been concluded."""
+        properties = self._properties()
+        summary = properties.index("executive_summary")
+        assert properties[summary + 1] == "confidence", (
+            "the confidence must be answered immediately after the summary it grades"
+        )
+        assert tuple(properties[summary + 2 :]) == self._AFTER_THE_JUDGEMENTS

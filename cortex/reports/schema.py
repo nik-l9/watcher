@@ -419,13 +419,37 @@ class InvestigationReport(_Strict):
     # summary first is impossible rather than merely awkward.
     #
     # So the summary and the confidence in it now come last: both are judgements over
-    # everything above them. `premise` stays early because the method establishes the effect
-    # before explaining it, and its input is the evidence, which is already in context.
+    # everything above them.
+    #
+    # **And `premise_checked` now comes before `premise`**, for the third time this ordering
+    # rule has had to be applied. The verifier's `VERDICT_SCHEMA` was reordered so `reason`
+    # precedes `verdict` after the same discovery; this field had the verdict first, and a
+    # measured run showed exactly what that produces. Across five attempts at
+    # `partial_month_false_premise`, one emitted `premise: holds` and then wrote *"No — on the
+    # days for which we actually have data, signups did not fall"*. The prose refuted the
+    # premise and the field said it stood, because a one-token enum was decided before a word
+    # of reasoning about it existed -- and `accuracy` reads the field, so a correct
+    # investigation scored zero.
+    #
+    # The original argument for the old order was that "the method establishes the effect
+    # before explaining it". That is the right rule for an *investigation* and the wrong one
+    # for a *generation*: this field is not the effect, it is a judgement about the effect, and
+    # its input is the sentence underneath it.
     #
     # Whether the provider's grammar honours this order strictly is not something this comment
     # can assert -- it is a claim about the constrained decoder, verifiable only by a live run.
     # The `Claim.text` floor is the protection that does not depend on it being true.
     question: str = Field(min_length=1, max_length=2000)
+    #: The assertion the report tested, so a reader can see what was checked -- and so the
+    #: verdict below is written after its own input rather than before it.
+    #:
+    #: 1,000 rather than the 500 this shipped with. A live attempt was **discarded** over the cap:
+    #: the model wrote "The question asserts a 3%... general, tenant-wide dip", the repair retry
+    #: fired twice with an error naming the limit, and it returned a value over the limit both
+    #: times. A constraint the model cannot satisfy on retry is not enforcing brevity, it is
+    #: throwing away completed investigations -- and 500 was out of line with its neighbours
+    #: anyway, where a hypothesis statement gets 1,000 and its reasoning 2,000.
+    premise_checked: str = Field(default="", max_length=1000)
     #: Whether the question's own assertion survived checking.
     #: Terse on purpose. The full instruction lives in `cortex.reports.shape`, which reaches the
     #: model as prose rather than as grammar -- a long description here is paid for twice, once
@@ -435,15 +459,6 @@ class InvestigationReport(_Strict):
         default=PremiseVerdict.NONE_ASSERTED,
         description="Verdict on what the question itself asserted.",
     )
-    #: The assertion the report tested, so a reader can see what was checked.
-    #:
-    #: 1,000 rather than the 500 this shipped with. A live attempt was **discarded** over the cap:
-    #: the model wrote "The question asserts a 3%... general, tenant-wide dip", the repair retry
-    #: fired twice with an error naming the limit, and it returned a value over the limit both
-    #: times. A constraint the model cannot satisfy on retry is not enforcing brevity, it is
-    #: throwing away completed investigations -- and 500 was out of line with its neighbours
-    #: anyway, where a hypothesis statement gets 1,000 and its reasoning 2,000.
-    premise_checked: str = Field(default="", max_length=1000)
     findings: list[Finding] = Field(default_factory=list)
     hypotheses: list[Hypothesis] = Field(default_factory=list)
     charts: list[ChartSpec] = Field(default_factory=list)
