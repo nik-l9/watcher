@@ -112,8 +112,10 @@ from cortex.reports.schema import Verdict as HypothesisVerdict
 from cortex.reports.verifier import (
     causal_claims,
     causal_hypotheses,
+    is_causal_claim,
     load_cited_evidence,
     render_evidence,
+    without_the_cause,
 )
 from cortex.tenancy.context import TenantContext
 
@@ -317,8 +319,29 @@ class SufficiencyDecision:
                     rejections.append(self._rejection(location, claim.text))
                     continue
                 claims_kept.append(claim)
-            if claims_kept:
-                findings_kept.append(finding.model_copy(update={"claims": claims_kept}))
+            if not claims_kept:
+                continue
+            # The title too, and it is the leak this whole block used to have. A finding's
+            # title carries no `evidence_ids`, so grounding cannot see it and the verifier has
+            # nothing to judge it against -- and the drafter puts the answer there, because
+            # that is what a title is for. Withholding the causal *claims* and delivering the
+            # cause in the heading above them withholds nothing.
+            title = finding.title
+            if is_causal_claim(title):
+                neutral = without_the_cause(title) or claims_kept[0].text[:200]
+                rejections.append(
+                    Rejection(
+                        location=f"findings[{f_index}].title",
+                        reason=RejectionReason.NO_SURVIVING_EVIDENCE,
+                        detail=(
+                            "sufficiency: the title named a cause the evidence does not "
+                            f"support. Missing: {self.missing_sentence}"
+                        )[:1000],
+                        text=title[:500],
+                    )
+                )
+                title = neutral
+            findings_kept.append(finding.model_copy(update={"claims": claims_kept, "title": title}))
 
         if not summary_kept:
             raise ReportRejected(
