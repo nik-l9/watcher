@@ -76,6 +76,7 @@ from cortex.reports.verifier import (
     _DECLINES_A_CAUSE,
     VerificationResult,
     causal_claims,
+    causal_finding_titles,
     causal_hypotheses,
 )
 
@@ -705,11 +706,22 @@ class Scorer:
         decoy is fine and often good — ruling one out is exactly what the loop is asked
         to do. Naming it *as the cause* is the failure, so only the executive summary
         and recommendations are examined.
+
+        **Plus any finding title that asserts a cause**, which is a conclusion by exactly this
+        dimension's own standard and was invisible to it. A finding's title is the line a reader
+        reads and it carries no citations, so a decoy named as the cause there was delivered and
+        scored 1.00. Titles are filtered through `is_causal_claim` rather than read wholesale,
+        which preserves the distinction the rest of this method rests on: a title *mentioning* a
+        decoy is the analyst discussing it, and only one asserting a cause is naming it.
+
+        Found the same way as the sufficiency gate's version of this leak — by reading a real
+        investigation whose withheld cause was delivered in a heading.
         """
         conclusion = " ".join(
             [c.text for c in report.executive_summary]
             + [r.action for r in report.recommendations]
             + [r.rationale for r in report.recommendations]
+            + [finding.title for _, finding in causal_finding_titles(report)]
         ).lower()
 
         # A decoy the analyst tested and ruled out. This is the *ideal* behaviour, not a

@@ -373,6 +373,51 @@ def causal_claims(report: InvestigationReport) -> list[tuple[str, Claim]]:
     return found
 
 
+def causal_finding_titles(report: InvestigationReport) -> list[tuple[int, Finding]]:
+    """Findings whose *title* asserts a cause, with their index.
+
+    The third place a withheld causal story can survive, and the one nobody was watching.
+    `causal_hypotheses` exists because a cause that survives only as a supported hypothesis has
+    not been withheld, it has been moved. A title is the same argument one field over, and worse
+    on delivery: a finding's title is the line a reader reads, it carries no `evidence_ids`, so
+    grounding cannot see it and the verifier has nothing to judge it against.
+
+    Found in the first investigation this project ran against real data. The sufficiency gate
+    withheld the cause -- *"nothing here dates or documents that rename/migration"* -- and the
+    delivered report still led its findings with *"the Canvas frontend 'conversation_created'
+    event undercounts **due to a consent-banner and telemetry-client regression**"*. Neither
+    claim beneath that title mentioned a consent banner. The withheld cause was delivered
+    anyway, uncited, in bold, and `delivered_hallucinations` counted zero because titles are
+    not claims.
+    """
+    return [
+        (index, finding)
+        for index, finding in enumerate(report.findings)
+        if is_causal_claim(finding.title)
+    ]
+
+
+def without_the_cause(title: str) -> str | None:
+    """`title` cut back to what it asserts before naming a cause, or None if nothing remains.
+
+    Truncation rather than rephrasing, because rephrasing would mean writing a sentence the
+    analyst did not write and attributing it to the analyst. Cutting at the connective leaves
+    the observation and drops the explanation, which is exactly what withholding a cause means.
+
+    Uses the same marker list as `is_causal_claim`, so a connective the detector fires on is a
+    connective this can cut at. The two drifting apart would leave a title detected as causal
+    and un-neutralisable.
+    """
+    lowered = title.lower()
+    cuts = [lowered.index(marker) for marker in _CAUSAL_MARKERS if marker in lowered]
+    if not cuts:
+        return None
+    kept = title[: min(cuts)].rstrip().rstrip(",;:-—–").rstrip()
+    # A remainder too short to be a finding title is not worth keeping: "The drop" says less
+    # than the claim beneath it, and the caller has that claim to fall back on.
+    return kept if len(kept) >= 12 else None
+
+
 def causal_hypotheses(report: InvestigationReport) -> list[tuple[int, Hypothesis]]:
     """Supported hypotheses that assert a cause, with their index.
 
