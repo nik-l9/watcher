@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +43,13 @@ from cortex.eval.fixtures import by_name
 from cortex.eval.replay import load_bundle, replay_bundle
 from cortex.eval.scorer import Scorer
 
-__all__ = ["DimensionSpread", "Spread", "measure_spread", "render_spread"]
+__all__ = [
+    "DimensionSpread",
+    "Spread",
+    "TrajectorySpread",
+    "measure_spread",
+    "render_spread",
+]
 
 #: Confidence and power for the minimum detectable effect.
 #:
@@ -82,11 +90,134 @@ class DimensionSpread:
         return self.sigma_attempt == 0.0
 
 
+#: The layer of consistency that predicts whether the answer is right.
+#:
+#: **Read from the literature rather than guessed at.** *How Consistent Are LLM Agents?
+#: Measuring Behavioral Reproducibility in Multi-Step Tool-Calling Pipelines* (arXiv 2605.28840)
+#: measures three layers and finds only one of them matters:
+#:
+#:   - **Tool Sequence Similarity** -- did the agent call the same tools in the same order.
+#:     Attempts in their high-TSS condition were **90.2%** correct against **61.2%** for
+#:     low-TSS (Cohen's d = 0.81). Structural variance is where failures concentrate.
+#:   - **Argument Consistency** -- did it pass the same parameters. *No* predictive power
+#:     (r = 0.12, not significant). Parametric variance is benign.
+#:   - **Output agreement** -- did it produce the same words. Under **5%** exact match even
+#:     when tool sequences were identical, and uncorrelated with failure.
+#:
+#: That last figure is the one worth holding onto: an agent that words its answer differently
+#: every time is behaving normally, and a project that treats prose variation as evidence of a
+#: broken system will spend its effort in the wrong place. The question worth asking is whether
+#: the *trajectory* was stable, and whether the *conclusion* was right.
+#:
+#: They also find divergence concentrates early -- 60% of it originates in the first two steps
+#: -- which is why the survey prefix is excluded below and the first decision is reported
+#: separately.
+_SURVEY_CAPABILITIES = ("list_repositories", "list_events", "list_projects", "list_queries")
+
+
+def _trajectory(bundle_calls: list[dict[str, Any]]) -> list[str]:
+    """The tool calls this attempt *chose*, as `tool__capability` names.
+
+    The survey prefix is dropped. Every investigation opens by calling each discovery
+    capability, which is the loop's own behaviour rather than a decision the model made, so
+    counting it inflates every similarity score by the same constant and hides the thing being
+    measured.
+    """
+    names = [
+        f"{call.get('tool_name')}__{call.get('capability')}"
+        for call in bundle_calls
+        if call.get("capability")
+    ]
+    index = 0
+    while index < len(names) and names[index].split("__", 1)[-1] in _SURVEY_CAPABILITIES:
+        index += 1
+    return names[index:]
+
+
+def _levenshtein(left: Sequence[str], right: Sequence[str]) -> int:
+    if not left:
+        return len(right)
+    previous = list(range(len(right) + 1))
+    for i, item in enumerate(left, start=1):
+        current = [i]
+        for j, other in enumerate(right, start=1):
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (item != other),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _sequence_similarity(left: Sequence[str], right: Sequence[str]) -> float:
+    """1.0 for identical sequences, 0.0 for entirely different ones."""
+    longest = max(len(left), len(right))
+    if longest == 0:
+        return 1.0
+    return 1.0 - _levenshtein(left, right) / longest
+
+
+def _argument_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    """Jaccard over flattened key-value pairs, as the paper defines it."""
+
+    def _pairs(params: dict[str, Any]) -> set[str]:
+        return {f"{key}={value!r}" for key, value in sorted(params.items())}
+
+    first, second = _pairs(left), _pairs(right)
+    if not first and not second:
+        return 1.0
+    return len(first & second) / len(first | second)
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectorySpread:
+    """How much one scenario's *route* varied, beside whether its answer was right.
+
+    Reported together on purpose. The two numbers answer different questions and the pair is
+    what makes either actionable: a scenario that is always right by a different route needs
+    nothing done about it, and one that is sometimes wrong by a different route has a cause to
+    look for in its first two steps.
+    """
+
+    scenario: str
+    attempts: int
+    #: Mean pairwise Tool Sequence Similarity across attempts. 1.0 = the same route every time.
+    tool_sequence_similarity: float
+    #: Mean pairwise Argument Consistency over the calls the attempts had in common.
+    argument_consistency: float
+    #: How many *distinct* routes the attempts took. The paper's own headline unit -- it
+    #: reports 2.0-4.2 distinct action sequences per 10 runs for ReAct agents on HotpotQA.
+    distinct_routes: int
+    #: Share of attempts that got the scenario's gating `accuracy` dimension right.
+    accuracy_rate: float
+    #: Whether every attempt agreed with every other about the answer, right or wrong.
+    unanimous: bool
+
+
 @dataclass(frozen=True, slots=True)
 class Spread:
     dimensions: tuple[DimensionSpread, ...]
     scenarios: tuple[str, ...]
     attempts_per_scenario: dict[str, int]
+    trajectories: tuple[TrajectorySpread, ...] = ()
+
+    @property
+    def route_accuracy_split(self) -> tuple[float, float] | None:
+        """Mean accuracy of the scenarios that took one route, against those that took several.
+
+        The replication of arXiv 2605.28840's central finding on this project's own data: they
+        report 90.2% correct for high tool-sequence similarity against 61.2% for low, and if
+        that holds here then the lever for accuracy is route stability rather than anything in
+        the drafting. Returns None until both groups have a member.
+        """
+        single = [t.accuracy_rate for t in self.trajectories if t.distinct_routes == 1]
+        several = [t.accuracy_rate for t in self.trajectories if t.distinct_routes > 1]
+        if not single or not several:
+            return None
+        return statistics.fmean(single), statistics.fmean(several)
 
 
 async def measure_spread(session: AsyncSession, directory: Path) -> Spread:
@@ -102,12 +233,23 @@ async def measure_spread(session: AsyncSession, directory: Path) -> Spread:
     bit-identical scorecard, so the numbers are the ones those attempts would have got.
     """
     by_scenario: dict[str, list[dict[str, float]]] = defaultdict(list)
+    routes: dict[str, list[list[str]]] = defaultdict(list)
+    arguments: dict[str, list[list[tuple[str, dict[str, Any]]]]] = defaultdict(list)
     scorer = Scorer()
     for path in sorted(directory.glob("*.json")):
         bundle = load_bundle(path)
-        tenant, investigation_id, view, gate_result, verification = await replay_bundle(
-            session, bundle
-        )
+        # `sufficiency` is unpacked and passed on, and leaving it out is why this module went
+        # unrun: `replay_bundle` grew a sixth return value when the sufficiency gate landed and
+        # this call still expected five, so every invocation of `--variance` since then has
+        # died on a tuple unpack. The instrument existed and produced no numbers.
+        (
+            tenant,
+            investigation_id,
+            view,
+            gate_result,
+            verification,
+            applied,
+        ) = await replay_bundle(session, bundle)
         card = await scorer.score(
             session,
             tenant,
@@ -116,8 +258,16 @@ async def measure_spread(session: AsyncSession, directory: Path) -> Spread:
             investigation=view,
             gate_result=gate_result,
             verification=verification,
+            sufficiency=applied,
         )
         by_scenario[bundle.scenario].append({d.name: d.score for d in card.dimensions})
+        routes[bundle.scenario].append(_trajectory(bundle.tool_calls))
+        arguments[bundle.scenario].append(
+            [
+                (f"{c.get('tool_name')}__{c.get('capability')}", c.get("params") or {})
+                for c in bundle.tool_calls
+            ]
+        )
 
     names: list[str] = []
     for attempts in by_scenario.values():
@@ -153,11 +303,99 @@ async def measure_spread(session: AsyncSession, directory: Path) -> Spread:
             )
         )
 
+    trajectories: list[TrajectorySpread] = []
+    for scenario, attempts in routes.items():
+        accuracies = [scores.get("accuracy") for scores in by_scenario[scenario]]
+        scored = [value for value in accuracies if value is not None]
+        pairs = [
+            (attempts[i], attempts[j])
+            for i in range(len(attempts))
+            for j in range(i + 1, len(attempts))
+        ]
+        calls = arguments[scenario]
+        argument_pairs = [
+            _argument_similarity(dict(left_params), dict(right_params))
+            for i in range(len(calls))
+            for j in range(i + 1, len(calls))
+            for (left_name, left_params) in calls[i]
+            for (right_name, right_params) in calls[j]
+            if left_name == right_name
+        ]
+        trajectories.append(
+            TrajectorySpread(
+                scenario=scenario,
+                attempts=len(attempts),
+                tool_sequence_similarity=(
+                    round(statistics.fmean(_sequence_similarity(a, b) for a, b in pairs), 4)
+                    if pairs
+                    else 1.0
+                ),
+                argument_consistency=(
+                    round(statistics.fmean(argument_pairs), 4) if argument_pairs else 1.0
+                ),
+                distinct_routes=len({tuple(route) for route in attempts}),
+                accuracy_rate=round(statistics.fmean(scored), 4) if scored else 0.0,
+                unanimous=len(set(scored)) <= 1,
+            )
+        )
+
     return Spread(
         dimensions=tuple(dimensions),
         scenarios=tuple(by_scenario),
         attempts_per_scenario={name: len(a) for name, a in by_scenario.items()},
+        trajectories=tuple(trajectories),
     )
+
+
+def _render_trajectories(spread: Spread) -> list[str]:
+    """The route table, and the one sentence that decides where to spend effort.
+
+    Separate from the score table because it answers a different question. The scores say how
+    large a difference has to be before it means something; this says whether the *route* was
+    stable and whether the answer was right -- and arXiv 2605.28840 finds that only the first
+    of those predicts the second.
+    """
+    if not spread.trajectories:
+        return []
+    lines = [
+        "",
+        "Route stability across the same attempts",
+        "=" * 72,
+        f"{'scenario':<36}{'TSS':>7}{'AC':>7}{'routes':>8}{'right':>8}",
+        "-" * 72,
+    ]
+    for trajectory in sorted(spread.trajectories, key=lambda t: t.tool_sequence_similarity):
+        lines.append(
+            f"{trajectory.scenario:<36}{trajectory.tool_sequence_similarity:>7.2f}"
+            f"{trajectory.argument_consistency:>7.2f}{trajectory.distinct_routes:>8}"
+            f"{trajectory.accuracy_rate:>8.2f}"
+        )
+    lines += ["-" * 72]
+
+    divided = [t for t in spread.trajectories if not t.unanimous]
+    if divided:
+        lines.append(
+            "Disagreed with itself about the answer: "
+            + ", ".join(f"{t.scenario} ({t.accuracy_rate:.0%} right)" for t in divided)
+            + ". This is the number that matters -- attempts wording one answer differently "
+            "are behaving normally, attempts reaching different answers are not."
+        )
+    else:
+        lines.append(
+            "Every scenario reached the same answer on every attempt. Route and wording still "
+            "vary, and neither is a defect on its own."
+        )
+
+    split = spread.route_accuracy_split
+    if split is not None:
+        single, several = split
+        lines.append(
+            f"One route: {single:.0%} right. Several routes: {several:.0%}. "
+            "arXiv 2605.28840 reports 90% against 61% for this split and finds argument "
+            "variance carries no signal at all, so route stability is where an intervention "
+            "belongs -- and 60% of route divergence originates in the first two steps."
+        )
+    return lines
 
 
 def render_spread(spread: Spread) -> str:
@@ -205,4 +443,5 @@ def render_spread(spread: Spread) -> str:
         "the same scenarios both sides -- and why an unpaired one mostly measures which "
         "scenarios were chosen."
     )
+    lines += _render_trajectories(spread)
     return "\n".join(lines) + "\n"
