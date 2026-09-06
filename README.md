@@ -88,6 +88,17 @@ make up-all     # + gateway, both workers, scheduler → http://localhost:8000/r
 make eval       # score the analyst against labeled fixtures (spends tokens)
 ```
 
+Then read one investigation, before spending anything on a suite:
+
+```bash
+make ask DATASET=campaign_traffic_drop   # ~100s, one LLM key, no connector credentials
+```
+
+That runs the production path — real investigator, real evidence rows, real grounding gate, real
+adversarial verifier — over a dataset whose true cause is known, and prints the planted cause
+afterwards so the answer can be checked rather than admired. It is the cheapest way to find out
+whether this works before wiring up a connector.
+
 Infrastructure and application services are split by compose profile so test-driven work does
 not wait on image builds. `make setup` installs from `uv.lock`, so you get the versions this
 project was tested against rather than whatever resolves today.
