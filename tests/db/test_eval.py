@@ -28,7 +28,7 @@ from cortex.agents.llm import (
     Usage,
 )
 from cortex.db.models import Evidence, ToolCall
-from cortex.eval.fixtures import SCENARIOS, Difficulty, alternatives_of, by_name
+from cortex.eval.fixtures import SCENARIOS, Difficulty, Scenario, alternatives_of, by_name
 from cortex.eval.replay import FAILURES_DIRNAME
 from cortex.eval.runner import EvalHarness, EvalRun, ScenarioOutcome, scenario_registry
 from cortex.eval.scorer import Scorer
@@ -417,22 +417,37 @@ class TestFixtures:
     def test_the_campaign_fixture_reconciles_with_its_own_story(self) -> None:
         """The fixture must not contradict itself.
 
-        A live investigation reported that the device funnel totals could not be
-        reconciled with the channel totals, and it was right — the contradiction was
-        planted by the fixture. An analyst that has to reason about impossible data is
-        being scored on the wrong thing, so the arithmetic is asserted here.
+        A live investigation reported that the device funnel totals could not be reconciled
+        with the channel totals, and it was right — the contradiction was planted by the
+        fixture. An analyst that has to reason about impossible data is being scored on the
+        wrong thing.
+
+        Three capabilities, one window, one number. The channel comparison, the device funnel
+        and the session series each used to state their own session count for these sixteen
+        days — 11,300, 11,300 and 13,239 — and an analyst citing two of them cited a
+        contradiction. They are projections of one series now, so this asserts the property
+        rather than a hand-checked sum.
         """
         scenario = by_name("campaign_traffic_drop")
-        channels = scenario.responses["ga4__compare_periods"]["comparison"]
-        expected_before = sum(row["sessions"]["previous"] for row in channels)
-        expected_after = sum(row["sessions"]["current"] for row in channels)
+        window = {"start_date": "2026-06-15", "end_date": "2026-06-30"}
+        comparison = scenario.response_for(
+            "ga4__compare_periods",
+            {
+                "current_start": window["start_date"],
+                "current_end": window["end_date"],
+                "previous_start": "2026-06-01",
+                "previous_end": "2026-06-14",
+                "dimensions": ["sessionDefaultChannelGroup"],
+            },
+        )["comparison"]
+        by_channel = sum(row["sessions"]["current"] for row in comparison)
+        by_device = sum(
+            row["metrics"]["sessions"]
+            for row in scenario.response_for("ga4__get_funnel", window)["rows"]
+        )
+        by_day = scenario.response_for("ga4__get_sessions", window)["totals"]["sessions"]
 
-        def _total(params: dict[str, str]) -> int:
-            rows = scenario.response_for("ga4__get_funnel", params)["rows"]
-            return sum(row["metrics"]["sessions"] for row in rows)
-
-        assert _total({"start_date": "2026-06-01"}) == expected_before
-        assert _total({"start_date": "2026-06-16"}) == expected_after
+        assert by_channel == by_device == by_day
 
     def test_the_campaign_fixture_holds_conversion_rate_flat(self) -> None:
         """Volume moves, rate does not — the observation that rules out a regression."""
@@ -518,7 +533,9 @@ class TestFixtures:
         """
         scenario = by_name("onboarding_regression")
         assert "github__pull_request_activity" in scenario.ground_truth.required_capabilities
-        activity = scenario.responses["github__pull_request_activity"]
+        activity = scenario.response_for(
+            "github__pull_request_activity", {"repo": "acme/web", "number": 913}
+        )
         assert any("viewport" in review["body"] for review in activity["reviews"])
 
     def test_the_campaign_deploy_decoy_is_refutable_from_evidence(self) -> None:
@@ -529,7 +546,12 @@ class TestFixtures:
         """
         scenario = by_name("campaign_traffic_drop")
         assert "github__commits" in scenario.ground_truth.required_capabilities
-        subjects = [c["subject"] for c in scenario.responses["github__commits"]["commits"]]
+        # Through the resolver, not the raw dict: these records are projected now, so reading
+        # `responses` would test a storage detail rather than what the analyst receives.
+        commits = scenario.response_for(
+            "github__commits", {"repo": "acme/web", "since": "2026-06-01", "until": "2026-06-30"}
+        )["commits"]
+        subjects = [c["subject"] for c in commits]
         assert subjects and not any("onboarding" in s.lower() for s in subjects)
 
     def test_the_unanswerable_scenario_has_no_candidate_cause(self) -> None:
@@ -1530,18 +1552,27 @@ class TestTheScenarioThatFailsIfADisclosureStops:
     should stop passing -- which is the property no other scenario had.
     """
 
+    #: The analyst's own request: three weeks of July through the middle of August. The gap is
+    #: between what this asks for and what the world has, so it has to be the request the
+    #: disclosure is computed against.
+    REQUEST = {"start_date": "2026-07-16", "end_date": "2026-08-15", "dimensions": ["date"]}
+
     def _ga4(self) -> dict:
         scenario = by_name("measurement_stopped")
-        payload = dict(scenario.responses["ga4__get_sessions"])
-        params = {"start_date": "2026-07-16", "end_date": "2026-08-15", "dimensions": ["date"]}
-        payload.update(series_disclosures("ga4__get_sessions", payload, params))
+        payload = dict(scenario.response_for("ga4__get_sessions", self.REQUEST))
+        payload.update(series_disclosures("ga4__get_sessions", payload, self.REQUEST))
         payload.update(grade_series("ga4__get_sessions", payload))
         return payload
 
     def test_the_fixture_declares_no_disclosure_itself(self) -> None:
         """Otherwise it would pass whether or not the connector computes one, which is the whole
-        thing this scenario was added to detect."""
-        raw = by_name("measurement_stopped").responses["ga4__get_sessions"]
+        thing this scenario was added to detect.
+
+        Asked of the payload the scenario actually serves, not of the dict it stores: the
+        session series is a projection now, and a test reading the store would keep passing
+        while the served payload declared whatever it liked.
+        """
+        raw = by_name("measurement_stopped").response_for("ga4__get_sessions", self.REQUEST)
         assert "series_ends_early" not in raw
         assert "data_trust" not in raw
 
@@ -1746,7 +1777,14 @@ class TestAFixtureAnswersOnlyWhatItWasAsked:
 
     @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
     def test_the_planted_subject_still_resolves(self, scenario) -> None:  # type: ignore[no-untyped-def]
-        """The risk in this change: strictness that also breaks the scenario's own question."""
+        """The risk in this change: strictness that also breaks the scenario's own question.
+
+        Asserted on the *rows returned*, not on equality with the stored dict. A projection
+        computes its count and echoes the window it was asked for, so byte-equality with the
+        payload is a storage detail — and the same assumption has now broken three tests across
+        this migration, each time because the thing being read stopped being the thing being
+        served.
+        """
         for capability, key in (
             ("posthog__event_trend", "event"),
             ("github__recent_prs", "repo"),
@@ -1755,7 +1793,10 @@ class TestAFixtureAnswersOnlyWhatItWasAsked:
             planted = scenario.responses.get(capability)
             if not planted or not isinstance(planted.get(key), str):
                 continue
-            assert scenario.response_for(capability, {key: planted[key]}) == planted
+            served = scenario.response_for(capability, {key: planted[key]})
+            for name, value in planted.items():
+                if isinstance(value, list) and value and isinstance(value[0], dict):
+                    assert served.get(name) == value, (capability, name)
 
     def test_a_different_event_returns_an_empty_series_not_another_one(self) -> None:
         scenario = by_name("partial_month_false_premise")
@@ -1835,7 +1876,7 @@ class TestAFixtureMustNotArgueAgainstItsOwnGroundTruth:
         """The whole argument. GA4 stops on the 3rd; PostHog carrying on to the 15th is what makes
         "the measurement broke" evidenced rather than the more comfortable of two guesses."""
         scenario = by_name("measurement_stopped")
-        rows = scenario.responses["ga4__get_sessions"]["rows"]
+        rows = scenario.response_for("ga4__get_sessions", {"end_date": "2026-08-15"})["rows"]
         ga4_last = max(r["dimensions"]["date"] for r in rows)
         assert ga4_last == "2026-08-03"
         posthog = scenario.response_for("posthog__event_trend", {"event": "$pageview"})
@@ -2037,26 +2078,18 @@ class TestAPlainTrendSeriesMustBeDerived:
     it in the first did nothing for the second.
 
     A canned payload cannot answer the interval it was asked for: it returns whatever buckets
-    were typed into it. So a plain trend series has to be planted as `daily_truth` and derived.
-    The exemption is a *segmented* series, which `DailyTruth` has no shape for — and that is
-    recorded here rather than left as an absence, so the next reader knows it was considered.
+    were typed into it. So a trend series has to be planted as `daily_truth` and derived.
+
+    There is no exemption any more. A *segmented* series used to be one, on the reasoning that
+    `DailyTruth` had no shape for a breakdown — and it was a real exemption, covering the one
+    payload in the suite that answered `interval="week"` with daily buckets. `DailyTruth` has
+    the shape now (`breakdown_property` and `segments`, as shares of the day the series already
+    states), so the rule is unconditional.
     """
 
-    @staticmethod
-    def _is_segmented(planted: dict) -> bool:
-        """Whether this payload is a per-segment breakdown, which `DailyTruth` cannot express.
-
-        Derived from the payload rather than from a list of scenario names, which is the same
-        lesson four derivations learned the hard way today: a name-keyed exemption does not
-        follow the data. `onboarding_regression_undecidable` inherits its parent's segmented
-        series and would have failed a name check while being exactly as exempt.
-        """
-        return all("segment" in row for row in planted.get("series") or [{}])
-
-    def test_no_scenario_plants_a_canned_plain_trend(self) -> None:
+    def test_no_scenario_plants_a_canned_trend(self) -> None:
         for scenario in SCENARIOS:
-            planted = scenario.responses.get("posthog__event_trend")
-            if planted is None or self._is_segmented(planted):
+            if scenario.responses.get("posthog__event_trend") is None:
                 continue
             raise AssertionError(
                 f"{scenario.name} plants a canned posthog__event_trend payload. A canned series "
@@ -2064,18 +2097,27 @@ class TestAPlainTrendSeriesMustBeDerived:
                 "Plant it as `daily_truth` instead."
             )
 
-    def test_the_exemption_only_covers_a_real_breakdown(self) -> None:
-        """An exemption nobody checks becomes a place to hide things. A payload that stops
-        carrying segments has no reason to stay canned, and then the test above catches it."""
-        exempt = [
-            s.name
-            for s in SCENARIOS
-            if (p := s.responses.get("posthog__event_trend")) and self._is_segmented(p)
-        ]
-        assert exempt, "no segmented payloads left: the exemption can be deleted"
-        for name in exempt:
-            series = by_name(name).responses["posthog__event_trend"]["series"]
-            assert series and all("segment" in row for row in series), name
+    def test_a_breakdown_is_returned_only_when_it_is_asked_for(self) -> None:
+        """The segmented series is itself a function of its request.
+
+        PostHog returns a flat series unless `breakdown_property` is passed, so a fixture that
+        always segmented would be answering a question nobody asked — and one that never did
+        would hide the scenario's decisive evidence.
+        """
+        checked = 0
+        for scenario in SCENARIOS:
+            for truth in scenario.daily_truth.get("posthog__event_trend", ()):
+                if not truth.segments:
+                    continue
+                asked = {"event": truth.event, "breakdown_property": truth.breakdown_property}
+                segmented = scenario.response_for("posthog__event_trend", asked)
+                flat = scenario.response_for("posthog__event_trend", {"event": truth.event})
+                assert all("segment" in row for row in segmented["series"]), scenario.name
+                assert not any("segment" in row for row in flat["series"]), scenario.name
+                # The breakdown divides the total; it does not restate it.
+                assert segmented["total"] == flat["total"], scenario.name
+                checked += 1
+        assert checked, "no segmented series checked: this property is asserting nothing"
 
     def test_every_derived_series_answers_the_interval_asked(self) -> None:
         """The property itself, across every scenario that has one, rather than per fixture."""
@@ -2231,14 +2273,15 @@ class TestTheDeclineTwinsArePairs:
 
         # The question is identical: same ask, different world.
         assert twin.question == parent.question
-        # The movement survives. Everything except the blanked capabilities is the parent's.
+        # Compared by what each *answers*, not by which dict holds it. Reading `responses` broke
+        # the moment a capability moved to a projection: the dicts matched, the answers did not,
+        # and the test called a disarmed twin identical to its parent.
         changed = {
             capability
-            for capability in parent.responses
-            if parent.responses[capability] != twin.responses.get(capability)
+            for capability in parent.planted_capabilities
+            if _ask(parent, capability) != _ask(twin, capability)
         }
         assert changed, twin_name
-        assert changed <= set(twin.responses)
         # And the perturbation is confined to one connector.
         assert len({capability.split("__")[0] for capability in changed}) == 1, sorted(changed)
 
@@ -2263,17 +2306,18 @@ class TestTheDeclineTwinsArePairs:
         uses for "looked, found nothing" — which is a different observation from "nobody asked",
         and the analyst has to be able to tell them apart."""
         parent, twin = by_name(parent_name), by_name(twin_name)
-        for capability, payload in twin.responses.items():
-            if parent.responses.get(capability) == payload:
+        for capability in parent.planted_capabilities:
+            before, after = _ask(parent, capability), _ask(twin, capability)
+            if before == after:
                 continue
-            # `count == 0` is the connector's own statement that it looked and found nothing.
-            assert payload.get("count") == 0, (capability, payload)
-            # At least one result list is empty. Not *all* of them: a blanked payload keeps its
-            # metadata, and `environments_available: ["prod-web", "staging"]` is the field that
-            # makes "looked, found nothing" distinguishable from "nobody looked" — which the
-            # analyst has to be able to tell apart, and which the parent scenarios rely on.
-            listed = [v for v in payload.values() if isinstance(v, list)]
-            assert any(not v for v in listed), (capability, payload)
+            # Every result list the parent filled is empty on the twin. Checked on the *answer*
+            # rather than the stored payload, and not on every list: a blanked capability keeps
+            # its metadata, and `environments_available: ["prod-web", "staging"]` is what makes
+            # "looked and found nothing" distinguishable from "nobody looked".
+            filled = {k for k, v in before.items() if isinstance(v, list) and v}
+            assert filled, (capability, before)
+            for key in filled:
+                assert not after.get(key), (capability, key, after.get(key))
 
     @pytest.mark.parametrize(("_parent", "twin_name"), PAIRS)
     def test_the_twin_keeps_every_fixture_invariant(self, _parent: str, twin_name: str) -> None:
@@ -2286,3 +2330,65 @@ class TestTheDeclineTwinsArePairs:
         assert twin.events_described() <= advertised
         for capability in twin.planted_capabilities:
             assert capability.split("__")[0] in twin.connected_tools, capability
+
+
+class TestATwinsPerturbationActuallyBites:
+    """A twin that blanks a layer nobody consults is a twin with no perturbation at all.
+
+    This happened. The twins blanked `responses` by capability name; when
+    `campaign_traffic_drop`'s Slack search moved to `dated_records`, `response_for` consulted the
+    projection first, the blanked dict was never reached, and the twin returned the campaign
+    announcement. Its cause was identifiable again and it went on passing — a scenario measuring
+    nothing, indistinguishable from one measuring what it claims.
+
+    Found two commits into ADR 0006, which is precisely the failure that ADR exists to stop, so
+    the property is asserted rather than the storage detail: for every capability a twin blanks,
+    the parent must return something and the twin nothing, whichever layer either uses.
+    """
+
+    PAIRS = (
+        ("onboarding_regression", "onboarding_regression_undecidable"),
+        ("campaign_traffic_drop", "campaign_traffic_drop_undecidable"),
+    )
+
+    @staticmethod
+    def _rows(payload: dict) -> int:
+        return sum(len(v) for v in payload.values() if isinstance(v, list))
+
+    @pytest.mark.parametrize(("parent_name", "twin_name"), PAIRS)
+    def test_each_blanked_capability_is_empty_on_the_twin_and_not_on_the_parent(
+        self, parent_name: str, twin_name: str
+    ) -> None:
+        parent, twin = by_name(parent_name), by_name(twin_name)
+        blanked = [
+            capability
+            for capability in parent.planted_capabilities
+            if self._rows(_ask(parent, capability)) and not self._rows(_ask(twin, capability))
+        ]
+        assert blanked, (
+            f"{twin_name} empties nothing its parent answers. Either the perturbation targets a "
+            "layer `response_for` no longer consults, or the twin is not a twin."
+        )
+
+    @pytest.mark.parametrize(("parent_name", "twin_name"), PAIRS)
+    def test_the_twin_keeps_the_envelope_of_what_it_blanks(
+        self, parent_name: str, twin_name: str
+    ) -> None:
+        """ "Looked and found nothing" must survive the blanking, or the analyst cannot tell it
+        from "nobody looked" — which is the distinction the whole scenario turns on."""
+        parent, twin = by_name(parent_name), by_name(twin_name)
+        for capability in parent.planted_capabilities:
+            before, after = _ask(parent, capability), _ask(twin, capability)
+            if not self._rows(before) or self._rows(after):
+                continue
+            scalars = {k for k, v in before.items() if not isinstance(v, list)}
+            assert scalars <= set(after), (capability, sorted(scalars - set(after)))
+
+
+def _ask(scenario: Scenario, capability: str) -> dict:
+    """The capability's answer to a request naming whatever the scenario plants."""
+    params: dict[str, object] = {}
+    records = scenario.dated_records.get(capability)
+    if records is not None and records.subject and not records.search_fields:
+        params[records.subject_param] = records.subject
+    return dict(scenario.response_for(capability, params))

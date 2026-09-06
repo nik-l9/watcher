@@ -117,6 +117,18 @@ _CAUSAL_MARKERS = (
     "causing",
     "cause of",
     "root cause",
+    # The plain assertion forms, missing until a decline-twin report said "the most likely
+    # proximate cause is a signup-blocking UI bug" and scanned as *not* causal -- so `accuracy`
+    # scored it as having declined, and the sufficiency gate would not have fired on it either.
+    # "cause of" and "root cause" were present; the copula was not.
+    "cause is",
+    "cause was",
+    "cause here is",
+    "likely cause",
+    "proximate cause",
+    "primary cause",
+    "main cause",
+    "the culprit",
     "because",
     "due to",
     "led to",
