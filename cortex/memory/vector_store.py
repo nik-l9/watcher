@@ -34,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from qdrant_client import AsyncQdrantClient, models
+from qdrant_client.http.exceptions import ResponseHandlingException
 
 from cortex.config.settings import get_settings
 from cortex.memory.embeddings import Embeddings
@@ -284,9 +285,38 @@ class QdrantVectorStore(VectorStore):
 
         written = 0
         for kind, points in by_kind.items():
-            await client.upsert(collection_name=self._collection(ctx, kind), points=points)
+            await self._write(client, self._collection(ctx, kind), points)
             written += len(points)
         return written
+
+    #: How many times a write is retried, and how long it waits between attempts.
+    #:
+    #: The managed cluster drops a request now and then -- twice in one afternoon, both times
+    #: with a `ResponseHandlingException` carrying no message at all. The vectors are already
+    #: computed by the time the write runs, so a retry costs one HTTP round trip and no
+    #: embedding quota, which is the whole argument: the alternative was a stream reporting
+    #: `ok` with its documents silently dropped, and re-embedding them on the next sync.
+    _WRITE_ATTEMPTS = 3
+    _WRITE_BACKOFF = 1.0
+
+    async def _write(
+        self, client: AsyncQdrantClient, collection: str, points: list[models.PointStruct]
+    ) -> None:
+        """One collection's points, retried on a transport failure.
+
+        Only `ResponseHandlingException`, which is what qdrant-client raises when the request
+        never got an answer. An `UnexpectedResponse` means the cluster answered and refused --
+        a missing collection, a bad key, a malformed point -- and none of those become true on
+        a second attempt.
+        """
+        for attempt in range(self._WRITE_ATTEMPTS):
+            try:
+                await client.upsert(collection_name=collection, points=points)
+                return
+            except ResponseHandlingException:
+                if attempt == self._WRITE_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(self._WRITE_BACKOFF * (attempt + 1))
 
     # ------------------------------------------------------------ reads
 

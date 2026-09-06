@@ -219,3 +219,90 @@ class TestRetentionCannotEmptyACollectionByAccident:
             vector_tenant_a, cutoff=datetime.now(UTC) - timedelta(days=1), kinds=["slack"]
         )
         assert removed == 1
+
+
+class TestATransportFailureIsRetriedRatherThanLosingTheDocuments:
+    """The write is retried; the embedding is not repeated. That asymmetry is the point.
+
+    A managed cluster dropped two writes in one afternoon, both with a
+    `ResponseHandlingException` carrying no message. Each cost a stream its documents, which
+    the next sync would have had to re-embed — and on a rate-limited embedding key that is the
+    expensive half. By the time the write runs the vectors exist, so a retry costs one HTTP
+    round trip and no quota.
+
+    Run against a fake client rather than real Qdrant: the behaviour under test is what happens
+    when the transport fails, and there is no way to ask a healthy cluster for that.
+    """
+
+    class _Flaky:
+        """Fails `fail_times` writes with a transport error, then succeeds."""
+
+        def __init__(self, fail_times: int) -> None:
+            self.remaining = fail_times
+            self.attempts = 0
+
+        async def upsert(self, *, collection_name: str, points: list) -> None:
+            del collection_name, points
+            self.attempts += 1
+            if self.remaining > 0:
+                self.remaining -= 1
+                import httpx
+                from qdrant_client.http.exceptions import ResponseHandlingException
+
+                raise ResponseHandlingException(source=httpx.ReadTimeout("dropped"))
+
+    def _store(self) -> QdrantVectorStore:
+        class _Embeddings:
+            model = "fake"
+            dimensions = 4
+
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+        store = QdrantVectorStore(_Embeddings(), url="http://unused", api_key=None)  # type: ignore[arg-type]
+        store._WRITE_BACKOFF = 0.0  # type: ignore[misc]
+        return store
+
+    async def test_one_dropped_write_is_retried_and_succeeds(self) -> None:
+        store = self._store()
+        client = self._Flaky(fail_times=1)
+
+        await store._write(client, "c_acme_1_docs", [])  # type: ignore[arg-type]
+
+        assert client.attempts == 2, "the write was not retried"
+
+    async def test_a_cluster_that_never_answers_still_raises(self) -> None:
+        """Bounded. A retry loop that never gives up turns a dead cluster into a hung sync,
+        and the note the runner writes is what makes the failure visible."""
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        store = self._store()
+        client = self._Flaky(fail_times=99)
+
+        with pytest.raises(ResponseHandlingException):
+            await store._write(client, "c_acme_1_docs", [])  # type: ignore[arg-type]
+
+        assert client.attempts == store._WRITE_ATTEMPTS
+
+    async def test_a_refusal_is_not_retried(self) -> None:
+        """An `UnexpectedResponse` means the cluster answered and said no — a missing
+        collection, a bad key, a malformed point. None of those become true on a second
+        attempt, and retrying them turns a clear error into a slow one."""
+        from qdrant_client.http.exceptions import UnexpectedResponse
+
+        class _Refuses:
+            def __init__(self) -> None:
+                self.attempts = 0
+
+            async def upsert(self, *, collection_name: str, points: list) -> None:
+                del collection_name, points
+                self.attempts += 1
+                raise UnexpectedResponse(404, "Not Found", b"no such collection", None)
+
+        store = self._store()
+        client = _Refuses()
+
+        with pytest.raises(UnexpectedResponse):
+            await store._write(client, "c_acme_1_docs", [])  # type: ignore[arg-type]
+
+        assert client.attempts == 1

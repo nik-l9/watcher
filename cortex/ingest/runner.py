@@ -96,6 +96,40 @@ class SyncOutcome:
         }
 
 
+def _describe(exc: BaseException) -> str:
+    """An exception rendered so the note names the reason, not only the class.
+
+    `ResponseHandlingException` is what qdrant-client raises when a request never got an
+    answer, and its `str()` is empty -- so the note read `documents not stored:
+    ResponseHandlingException: ` and told an operator nothing. Twice in one afternoon, on a
+    managed cluster, with the real reason sitting one link down the cause chain.
+
+    The chain is walked rather than just `repr`'d because that is where the reason lives: an
+    `httpx.ReadTimeout` or `ConnectError` under the qdrant wrapper. A class name with no
+    message is the one thing this must never produce.
+
+    `.source` is walked alongside `__cause__` and `__context__` because qdrant-client's
+    wrapper sets neither -- it takes the underlying exception as a constructor argument and
+    stores it on an attribute, so `raise ... from ...` never happens and the standard chain
+    is empty. Following only the standard links found nothing and printed the bare class name,
+    which is the defect this function exists to fix.
+    """
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).strip()
+        parts.append(f"{type(current).__name__}: {message}" if message else type(current).__name__)
+        nested = getattr(current, "source", None)
+        current = (
+            nested
+            if isinstance(nested, BaseException)
+            else current.__cause__ or current.__context__
+        )
+    return " <- ".join(parts[:3])
+
+
 class IngestRunner:
     def __init__(
         self,
@@ -202,7 +236,18 @@ class IngestRunner:
                 # cannot be walked.
                 edges = await self._graph.upsert_edges(tenant, result.edges)
 
-            if result.documents and self._vectors is not None:
+            if result.documents and self._vectors is None:
+                # Recorded per stream, not only in the header line the caller printed once.
+                # A sync whose vector store was unreachable at provision time skipped this
+                # block entirely and every stream reported `ok` with `docs=0` -- so
+                # `--status` showed green while the tenant had no semantic memory at all.
+                # "A stream that succeeded with a note is the interesting case"; this one
+                # succeeded with no note.
+                gaps.append(
+                    f"{len(result.documents)} document(s) not stored: semantic memory was "
+                    "unavailable for this run"
+                )
+            elif result.documents and self._vectors is not None:
                 try:
                     documents = await self._vectors.upsert(tenant, result.documents)
                 except EmbeddingError as exc:
@@ -219,7 +264,7 @@ class IngestRunner:
                     # succeeded. Semantic memory is additive; the graph is the core. The
                     # note is what keeps this from being silent — a report reading
                     # sync_state can say memory is incomplete.
-                    gaps.append(f"documents not stored: {type(exc).__name__}: {exc}")
+                    gaps.append(f"documents not stored: {_describe(exc)}")
 
             if result.points:
                 points = await write_points(

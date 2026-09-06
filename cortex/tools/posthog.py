@@ -508,26 +508,41 @@ class PostHogTool(BaseTool):
             meta={"freshness": Freshness.LIVE},
         )
 
-    async def _gap_blast_radius(
-        self, ctx: ToolContext, project: str | None, gap: dict[str, Any] | None
-    ) -> dict[str, Any] | None:
-        """The sibling-event check, run only when a series actually ended early.
+    async def _sibling_context(
+        self,
+        ctx: ToolContext,
+        project: str | None,
+        *,
+        event: str,
+        gap: dict[str, Any] | None,
+        moved: bool,
+    ) -> dict[str, Any]:
+        """What the project's other event definitions say about this series.
 
-        Costs one extra request on the calls that need it and nothing on the calls that do
-        not, which is why it lives behind the gap rather than beside it.
+        Two disclosures from one request, each fetched only when it could matter:
 
-        `include_stale` is deliberately off-by-default elsewhere and forced on here: an event
-        that stopped six weeks ago is precisely what this is looking for, and excluding stale
-        definitions would hide the evidence that a whole group went quiet together.
+        **`blast_radius`**, when the series ended early — did this event stop alone, or did a
+        group stop together? `include_stale` is off-by-default elsewhere and forced on here: an
+        event that stopped six weeks ago is precisely what this is looking for.
 
-        Failure is swallowed. This enriches a disclosure; it must never be the reason a trend
+        **`related_events`**, when the series *moved* — is there another event measuring the
+        same thing under a different name? Five attempts at one real question produced "volume
+        did not fall", "it fell 78%", "it rose 18x", and twice "the premise does not hold",
+        because `conversation_created` and `agent_server.conversation_created` both exist and
+        whether the analyst noticed depended on whether it happened to query both. The one
+        attempt that read a single series reported *"a confirmed level shift of about 78%"* --
+        every figure real, correctly cited, and wrong. No grounding mechanism can see that.
+
+        Fetched here rather than left to the investigation for the same reason `blast_radius`
+        is: the analyst has to hold the movement and the sibling at the same time to interpret
+        either, and in production it did not go back for the second call.
+
+        Failure is swallowed. These enrich a disclosure; neither may be the reason a trend
         that was fetched successfully fails to return.
         """
-        if not gap:
-            return None
-        last_bucket = _last_seen(gap.get("series_ends_early", {}).get("last_bucket"))
-        if last_bucket is None:
-            return None
+        last_bucket = _last_seen((gap or {}).get("series_ends_early", {}).get("last_bucket"))
+        if last_bucket is None and not moved:
+            return {}
         try:
             raw = await self._get(
                 ctx,
@@ -536,8 +551,14 @@ class PostHogTool(BaseTool):
                 project=project,
             )
         except (ToolError, httpx.HTTPError):
-            return None
-        return _blast_radius(list(raw.get("results") or []), last_bucket)
+            return {}
+        definitions = list(raw.get("results") or [])
+        found: dict[str, Any] = {}
+        if last_bucket is not None:
+            found.update(_blast_radius(definitions, last_bucket) or {})
+        if moved:
+            found.update(_related_events(definitions, event) or {})
+        return found
 
     async def event_trend(
         self,
@@ -619,7 +640,11 @@ class PostHogTool(BaseTool):
         # hold the warning and the resolving evidence at the same time to use either, and in
         # production it did not go back for the second call. A fixture supplies `blast_radius`
         # directly, which is what this query would have returned.
-        payload.update(await self._gap_blast_radius(ctx, project, gap) or {})
+        payload.update(
+            await self._sibling_context(
+                ctx, project, event=event, gap=gap, moved=_worth_comparing(payload)
+            )
+        )
 
         # The data-trust gate, last, because it reads the disclosures above rather than the
         # rows. ADR 0005 decision 1: a series whose events stopped together with others on the
@@ -921,6 +946,128 @@ def _last_seen(value: Any) -> date | None:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(UTC).date()
+
+
+#: How many name-siblings are worth naming, and how long a shared word has to be to count.
+#:
+#: Five, because the point is to make the analyst check one other series, not to hand it a
+#: research project -- and a project with `$pageview_1` through `$pageview_84` would otherwise
+#: bury the disclosure it is supposed to be. Six characters, because shorter shared words
+#: ("user", "api", "new") relate almost anything to anything.
+_MAX_SIBLINGS = 5
+_MIN_SHARED_WORD = 6
+
+#: Lifecycle verbs, excluded from the overlap. Almost every product event ends in one, so
+#: matching on them relates almost anything to anything: `conversation_created` came back
+#: "related" to `api key created` on the strength of the word "created" alone. What makes two
+#: events candidates for measuring one concept is a shared *subject*, not a shared verb.
+_LIFECYCLE_WORDS = frozenset(
+    {
+        "created",
+        "updated",
+        "deleted",
+        "removed",
+        "started",
+        "stopped",
+        "finished",
+        "completed",
+        "changed",
+        "clicked",
+        "viewed",
+        "opened",
+        "closed",
+        "saved",
+        "failed",
+        "succeeded",
+        "submitted",
+        "received",
+        "enabled",
+        "disabled",
+    }
+)
+
+
+def _words(name: str) -> set[str]:
+    return {
+        word
+        for word in re.split(r"[^0-9a-z]+", name.lower())
+        if len(word) >= _MIN_SHARED_WORD and word not in _LIFECYCLE_WORDS
+    }
+
+
+def _worth_comparing(payload: dict[str, Any]) -> bool:
+    """Whether this series is one a sibling event could change the reading of.
+
+    A confirmed level shift, and nothing else. A series that did not move has nothing in it to
+    misread, and that keeps the cost discipline `blast_radius` set: one extra request on the
+    calls that need it, none on the calls that do not.
+
+    **Known blind spot, chosen rather than missed.** `describe_movement` needs
+    `min_segment_days` (14) on each side and returns no verdict at all below that, so a
+    request for a window under a month carries no `movement` block whether or not anything
+    happened -- and an analyst reading a three-week series is exactly as exposed to a rename as
+    one reading a longer series. Treating an absent verdict as grounds to look was implemented
+    and reverted: "last two weeks" and "last month" are the commonest questions asked, so it
+    put an extra request on nearly every trend call, which is the cost this gate exists to
+    avoid. Closing it properly means making the shift test work on short windows, not paying
+    for a lookup on every call.
+    """
+    if not payload.get("series"):
+        return False
+    return bool((payload.get("movement") or {}).get("level_shifts"))
+
+
+def _related_events(events: list[dict[str, Any]], event: str) -> dict[str, Any] | None:
+    """Other events in this project that may measure the same thing under a different name.
+
+    **Why a connector says this rather than the analyst working it out.** A rename or a
+    re-emitter migration leaves two events for one concept, and a series read without its
+    sibling is a series that can move for reasons that have nothing to do with behaviour. Five
+    attempts at one real question -- *did conversation volume change in August?* -- returned
+    "it did not fall", "it fell 78%", "it rose 18x", and twice "the premise does not hold",
+    entirely according to whether the attempt happened to query both
+    `conversation_created` and `agent_server.conversation_created`.
+
+    Name overlap, not semantics: a shared word of six characters or more, in either direction,
+    which is what a rename and a re-prefixing both look like. The connector is entitled to say
+    *these names overlap and both have data*; whether they measure the same thing is the
+    investigation's judgement and the note says so.
+
+    Stale siblings are kept and their `last_seen_at` reported, because a handover is exactly
+    the case this exists for: the old event dies as the new one starts, and a filter that
+    dropped dead events would drop the more informative half of it.
+    """
+    mine = _words(event)
+    if not mine or not events:
+        return None
+    siblings: list[dict[str, Any]] = []
+    for row in events:
+        name = row.get("name")
+        if not isinstance(name, str) or name == event:
+            continue
+        seen = _last_seen(row.get("last_seen_at"))
+        if seen is None or not (mine & _words(name)):
+            continue
+        siblings.append({"name": name, "last_seen_at": seen.isoformat()})
+    if not siblings:
+        return None
+    siblings.sort(key=lambda entry: entry["last_seen_at"], reverse=True)
+    shown = siblings[:_MAX_SIBLINGS]
+    return {
+        "related_events": {
+            "matched_on": sorted(mine),
+            "count": len(siblings),
+            "events": shown,
+            "note": (
+                f"{len(siblings)} other event(s) in this project share a name with "
+                f"{event!r} and have data of their own"
+                + (f", the {len(shown)} most recent shown" if len(siblings) > len(shown) else "")
+                + ". A rename or a change of emitter leaves two events for one concept, so a "
+                "movement in this series may be a movement in what is being recorded rather "
+                "than in what users did. Compare before reading it as a change in behaviour."
+            ),
+        }
+    }
 
 
 def _blast_radius(events: list[dict[str, Any]], last_bucket: date) -> dict[str, Any] | None:
