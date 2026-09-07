@@ -11,11 +11,16 @@ about a marketing campaign, where a data-incident verdict outranks and replaces 
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
-from cortex.analysis.coverage import BUCKET_DAYS, gap_disclosure
+from cortex.analysis.coverage import (
+    BUCKET_DAYS,
+    FRESHNESS_TOLERANCE_DAYS,
+    freshness_disclosure,
+    gap_disclosure,
+)
 
 ALTERNATIVES = "it may have stopped, or tracking may be broken"
 
@@ -140,3 +145,82 @@ def _trips_as_of(buckets: list[date], *, end: date, as_of: date) -> bool:
         )
         is not None
     )
+
+
+class TestTheSecondClock:
+    """Staleness against the clock, because the bucket grid cannot see it.
+
+    `gap_disclosure` asks whether a *complete bucket finished inside the range and reported
+    nothing*. That is the right question about the grid, and a coarse interval answers it "no"
+    for a very long time: its tolerance is two bucket spans, so at monthly granularity a series
+    whose collection died on 3 August reports no gap when read on 7 September. August finished,
+    and August had data in it.
+
+    That is not a hypothetical. A live investigation asked for monthly signups through 7
+    September, was told nothing, saw a small August bucket and wrote *"August's 580 ... likely
+    reflect an incomplete trailing month/data lag rather than a genuine drop"*. Collection had
+    stopped 35 days earlier and 52 unrelated events had stopped with it. **The same world asked
+    daily produced the full warning** — so the disclosure was granularity-dependent, which is
+    the one property a data-quality warning must never have.
+    """
+
+    ALTERNATIVES = "Collection may be broken, or the event may have been renamed"
+
+    def _disclose(self, last: date | None, *, end: date, as_of: date | None = None) -> dict | None:
+        return freshness_disclosure(
+            last, window_end=end, as_of=as_of, alternatives=self.ALTERNATIVES
+        )
+
+    def test_a_monthly_series_cannot_hide_a_dead_pipeline(self) -> None:
+        """The case that produced the wrong answer, at the granularity that hid it."""
+        found = self._disclose(date(2026, 8, 3), end=date(2026, 9, 7), as_of=date(2026, 9, 7))
+        assert found is not None
+        assert found["data_freshness"] == {
+            "last_event": "2026-08-03",
+            "period_end": "2026-09-07",
+            "days_short": 35,
+        }
+        assert "The period is not young; the data stops." in found["data_freshness_note"]
+
+    def test_it_says_the_same_thing_at_every_granularity(self) -> None:
+        """The whole point. `gap_disclosure` takes an interval and this does not, because a
+        fortnight of missing data is a fortnight whether it is read in days or months."""
+        import inspect
+
+        assert "interval" not in inspect.signature(freshness_disclosure).parameters
+
+    def test_a_source_running_a_day_behind_is_the_normal_state(self) -> None:
+        """A daily series ending yesterday is a live source, not a defect. A warning that
+        fires on every ordinary read is a warning nobody reads on the day it matters."""
+        assert (
+            self._disclose(date(2026, 9, 6), end=date(2026, 9, 7), as_of=date(2026, 9, 7)) is None
+        )
+
+    def test_the_tolerance_is_the_stated_one(self) -> None:
+        """Pinned, so an edit to the constant cannot silently change when this fires."""
+        assert FRESHNESS_TOLERANCE_DAYS == 2
+        at_the_limit = date(2026, 9, 7) - timedelta(days=FRESHNESS_TOLERANCE_DAYS)
+        assert self._disclose(at_the_limit, end=date(2026, 9, 7)) is None
+        past_it = at_the_limit - timedelta(days=1)
+        assert self._disclose(past_it, end=date(2026, 9, 7)) is not None
+
+    def test_days_that_have_not_happened_are_not_missing(self) -> None:
+        """The same clamp `gap_disclosure` applies. Without it, every question whose range runs
+        into the future reports a collection failure for the part still to come — and asking
+        about the current quarter is an ordinary request."""
+        assert (
+            self._disclose(date(2026, 9, 6), end=date(2026, 12, 31), as_of=date(2026, 9, 7)) is None
+        )
+
+    def test_a_series_with_no_last_observation_says_nothing(self) -> None:
+        """An empty series is reported through the payload's own count, and a second voice
+        saying the same thing adds noise rather than information."""
+        assert self._disclose(None, end=date(2026, 9, 7)) is None
+
+    def test_the_note_points_at_what_would_settle_it(self) -> None:
+        """Not interpreted, like its neighbour: a stale source can be a broken pipeline, a
+        rename, or a real stop, and the connector reports the shortfall and the candidates
+        rather than guessing between them."""
+        note = self._disclose(date(2026, 8, 3), end=date(2026, 9, 7))["data_freshness_note"]
+        assert self.ALTERNATIVES in note
+        assert "is not evidence of a fall in the metric until the stop is explained" in note
