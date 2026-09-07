@@ -21,7 +21,14 @@ import httpx
 
 from cortex.analysis.coverage import gap_disclosure
 from cortex.db.models import CredentialProvider
-from cortex.tools.base import Capability, Freshness, InvalidParams, ToolContext, ToolResult
+from cortex.tools.base import (
+    Capability,
+    Freshness,
+    InvalidParams,
+    ToolContext,
+    ToolError,
+    ToolResult,
+)
 from cortex.tools.base import Tool as BaseTool
 from cortex.tools.disclosures import grade_series, series_disclosures
 from cortex.tools.google_auth import GA4_SCOPES, access_token
@@ -380,18 +387,66 @@ class GA4Tool(BaseTool):
                 }
             comparison.append(entry)
 
+        payload: dict[str, Any] = {
+            "property_id": self._property_id(ctx),
+            "current_period": {"start": current_start, "end": current_end},
+            "previous_period": {"start": previous_start, "end": previous_end},
+            "metrics": metrics,
+            "dimensions": dimensions,
+            "row_count": len(comparison),
+            "comparison": comparison,
+        }
+        payload.update(
+            await self._coverage(
+                ctx,
+                current=(current_start, current_end),
+                previous=(previous_start, previous_end),
+                limit=limit,
+            )
+        )
         return ToolResult(
-            payload={
-                "property_id": self._property_id(ctx),
-                "current_period": {"start": current_start, "end": current_end},
-                "previous_period": {"start": previous_start, "end": previous_end},
-                "metrics": metrics,
-                "dimensions": dimensions,
-                "row_count": len(comparison),
-                "comparison": comparison,
-            },
+            payload=payload,
             source_ref=_source_ref(self._property_id(ctx), previous_start, current_end),
             meta=_quality(raw),
+        )
+
+    async def _coverage(
+        self,
+        ctx: ToolContext,
+        *,
+        current: tuple[str, str],
+        previous: tuple[str, str],
+        limit: int,
+    ) -> dict[str, Any]:
+        """How many days of data each compared window actually holds.
+
+        One extra request, and only on comparisons long enough for the answer to be invisible
+        in the figures -- the cost discipline `posthog._sibling_context` sets, for the same
+        reason: a note on every call is a note nobody reads on the one that needed it.
+
+        A dated series is the only way to get this. The comparison itself is grouped by
+        dimension, so twelve days of sessions and thirty-one days of sessions are the same
+        single number in it, and the shortfall that produced a 61.8% phantom decline three
+        separate times is not recoverable from the payload.
+
+        Failure is swallowed. This qualifies a comparison that was fetched successfully; it must
+        never be the reason one fails to return.
+        """
+        if all(_days(start, end) < _COVERAGE_FLOOR_DAYS for start, end in (current, previous)):
+            return {}
+        span_start, span_end = min(current[0], previous[0]), max(current[1], previous[1])
+        try:
+            dated = await self._run(
+                ctx,
+                metrics=["sessions"],
+                dimensions=["date"],
+                ranges=[{"startDate": span_start, "endDate": span_end}],
+                limit=max(limit, _days(span_start, span_end)),
+            )
+        except (ToolError, httpx.HTTPError):
+            return {}
+        return (
+            _window_coverage(_parse_rows(dated), {"current": current, "previous": previous}) or {}
         )
 
     async def get_funnel(
@@ -545,6 +600,82 @@ def _parse_totals(raw: dict[str, Any], metrics: list[str]) -> dict[str, Any]:
         return {}
     values = [_coerce(m.get("value")) for m in totals[0].get("metricValues", [])]
     return dict(zip(metrics, values, strict=False))
+
+
+#: Below this, a comparison is short enough that a day or two of missing data is visible in the
+#: figures themselves. At a fortnight or more the reader is looking at a monthly total and has
+#: no way to tell how many days went into it.
+_COVERAGE_FLOOR_DAYS = 14
+
+
+def _days(start: str, end: str) -> int:
+    return (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+
+
+def _window_coverage(
+    rows: list[dict[str, Any]], windows: dict[str, tuple[str, str]]
+) -> dict[str, Any] | None:
+    """Whether the two windows being compared actually hold the same amount of data.
+
+    **The defect this closes has now been seen three times, and each time it produced a
+    confidently wrong headline.** An analyst asked to compare August against July asks for
+    2026-08-01..08-31 against 07-01..07-31 -- two windows of equal *length* -- and GA4 answers
+    with whatever it has. When the property's data stops on 12 August, the August "total" is
+    twelve days against July's thirty-one, and the resulting 61.8% "decline" is
+    12/31 restated. The report then leads with it.
+
+    Nothing in the comparison payload could show that: it is grouped by dimension, not by date,
+    so thirty-one days and twelve days of sessions are the same single number. The dates have to
+    be counted, which is what the caller's extra query is for.
+
+    Coverage, not length. Two windows can be the same length and hold different amounts of
+    data, which is exactly the case that goes wrong; and a window can legitimately be shorter
+    than another and still be fully covered, which is not a defect and must not be reported as
+    one.
+    """
+    seen: dict[str, set[str]] = {name: set() for name in windows}
+    for row in rows:
+        day = (row.get("dimensions") or {}).get("date")
+        if not isinstance(day, str):
+            continue
+        for name, (start, end) in windows.items():
+            if start <= day <= end:
+                seen[name].add(day)
+
+    measured = {
+        name: {
+            "requested_days": _days(start, end),
+            "days_with_data": len(seen[name]),
+            "last_day_with_data": max(seen[name]) if seen[name] else None,
+        }
+        for name, (start, end) in windows.items()
+    }
+    if all(m["requested_days"] < _COVERAGE_FLOOR_DAYS for m in measured.values()):
+        return None
+    shortfalls = {name: m["requested_days"] - m["days_with_data"] for name, m in measured.items()}
+    # Only when the two sides differ. A comparison equally short on both sides is still a fair
+    # comparison, and a note on every month-scale call is a note nobody reads on the one that
+    # needed it.
+    if max(shortfalls.values()) == min(shortfalls.values()):
+        return None
+    worst = max(shortfalls, key=lambda name: shortfalls[name])
+    other = next(name for name in measured if name != worst)
+    return {
+        "window_coverage": {
+            **measured,
+            "comparable": False,
+            "note": (
+                f"These windows do not hold the same amount of data. The {worst} period asked "
+                f"for {measured[worst]['requested_days']} days and has "
+                f"{measured[worst]['days_with_data']}, ending "
+                f"{measured[worst]['last_day_with_data']}; the {other} period asked for "
+                f"{measured[other]['requested_days']} and has "
+                f"{measured[other]['days_with_data']}. A total over fewer days is smaller for "
+                "that reason alone, so the percentage change below is not a change in the "
+                "metric. Compare equal numbers of days, or compare per-day rates."
+            ),
+        }
+    }
 
 
 def _split_by_range(

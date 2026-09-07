@@ -11,6 +11,8 @@ answer must be None, never a fabricated number.
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -587,3 +589,125 @@ class TestASeriesThatStopsEarly:
         )
         assert "series_ends_early" not in result.payload
         assert "data_trust" not in result.payload
+
+
+class TestAComparisonSaysWhetherItsWindowsAreComparable:
+    """The defect that produced a confidently wrong headline three separate times.
+
+    Asked to compare August against July, an analyst asks for 2026-08-01..08-31 against
+    07-01..07-31 — two windows of equal *length*. When the property's data stops on 12 August,
+    GA4 answers with twelve days of sessions against thirty-one and calls it a 61.8% decline,
+    which is 12/31 restated. Seen in eval run 36, in a five-attempt repeat, and again in a
+    ten-attempt repeat; each time the report led with the phantom figure.
+
+    Nothing in the comparison payload can show it. The comparison is grouped by dimension, not
+    by date, so twelve days and thirty-one days of sessions are the same single number — which
+    is why this costs one extra dated request, and why it is worth it.
+    """
+
+    @classmethod
+    def _handler(cls, days: list[str]) -> Any:
+        """Dispatch on the request body, because the two calls differ by what they ask for.
+
+        The comparison asks for two `dateRanges`; the coverage query asks for one range broken
+        down by `date`. A response map keyed on the URL cannot tell them apart -- both are
+        `:runReport` -- so the body is what distinguishes them.
+        """
+        import json as _json
+
+        def _respond(request: httpx.Request) -> httpx.Response:
+            body = _json.loads(request.content)
+            wants_dates = [d.get("name") for d in body.get("dimensions") or []] == ["date"]
+            return httpx.Response(200, json=cls._dated(days) if wants_dates else cls._comparison())
+
+        return _respond
+
+    @staticmethod
+    def _dated(days: list[str]) -> dict[str, Any]:
+        return {
+            "dimensionHeaders": [{"name": "date"}],
+            "metricHeaders": [{"name": "sessions"}],
+            "rows": [
+                {"dimensionValues": [{"value": day}], "metricValues": [{"value": "100"}]}
+                for day in days
+            ],
+        }
+
+    @staticmethod
+    def _comparison() -> dict[str, Any]:
+        return {
+            "dimensionHeaders": [{"name": "dateRange"}],
+            "metricHeaders": [{"name": "sessions"}],
+            "rows": [
+                {
+                    "dimensionValues": [{"value": "date_range_0"}],
+                    "metricValues": [{"value": "1200"}],
+                },
+                {
+                    "dimensionValues": [{"value": "date_range_1"}],
+                    "metricValues": [{"value": "3100"}],
+                },
+            ],
+        }
+
+    #: July complete, August stopping on the 12th. The shape that goes wrong.
+    TRUNCATED = [f"2026-07-{d:02d}" for d in range(1, 32)] + [
+        f"2026-08-{d:02d}" for d in range(1, 13)
+    ]
+
+    async def test_unequal_coverage_is_disclosed_with_the_reason(
+        self, tool: GA4Tool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        patch_client(tool, self._handler(self.TRUNCATED), is_async_factory=True)
+        result = await tool.compare_periods(
+            ctx,
+            current_start="2026-08-01",
+            current_end="2026-08-31",
+            previous_start="2026-07-01",
+            previous_end="2026-07-31",
+        )
+
+        coverage = result.payload["window_coverage"]
+        assert coverage["comparable"] is False
+        assert coverage["current"] == {
+            "requested_days": 31,
+            "days_with_data": 12,
+            "last_day_with_data": "2026-08-12",
+        }
+        assert coverage["previous"]["days_with_data"] == 31
+        assert "is not a change in the metric" in coverage["note"]
+
+    async def test_equal_coverage_says_nothing(
+        self, tool: GA4Tool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        """A fair comparison needs no note, and a note on every month-scale call is a note
+        nobody reads on the one that needed it."""
+        complete = [f"2026-07-{d:02d}" for d in range(1, 32)] + [
+            f"2026-08-{d:02d}" for d in range(1, 32)
+        ]
+        patch_client(tool, self._handler(complete), is_async_factory=True)
+        result = await tool.compare_periods(
+            ctx,
+            current_start="2026-08-01",
+            current_end="2026-08-31",
+            previous_start="2026-07-01",
+            previous_end="2026-07-31",
+        )
+
+        assert "window_coverage" not in result.payload
+
+    async def test_a_short_comparison_pays_nothing_for_this(
+        self, tool: GA4Tool, ctx: ToolContext, patch_client: Any
+    ) -> None:
+        """Under a fortnight the shortfall is visible in the figures themselves, so the extra
+        request is not worth making — the same discipline `blast_radius` set."""
+        transport = patch_client(tool, self._handler([]), is_async_factory=True)
+        await tool.compare_periods(
+            ctx,
+            current_start="2026-08-08",
+            current_end="2026-08-14",
+            previous_start="2026-08-01",
+            previous_end="2026-08-07",
+        )
+
+        assert len(transport.requests) == 1
