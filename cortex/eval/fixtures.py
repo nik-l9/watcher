@@ -31,10 +31,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-# The connector's own change arithmetic, imported rather than reimplemented. A fixture that
-# computes percentage change its own way is a second implementation of the thing the contract
-# test compares, and the two would drift on the first edge case (a zero previous value).
-from cortex.tools.ga4 import _absolute, _percent
+# The connector's own change arithmetic and coverage check, imported rather than
+# reimplemented. A fixture that computes percentage change its own way is a second
+# implementation of the thing the contract test compares, and the two would drift on the
+# first edge case (a zero previous value).
+from cortex.tools.ga4 import _absolute, _percent, _window_coverage
 
 
 class Difficulty(enum.StrEnum):
@@ -429,7 +430,14 @@ class Scenario:
         if self.metric_series is not None and qualified_name in GA4_SERIES_CAPABILITIES:
             projection = _GA4_PROJECTIONS.get(qualified_name)
             if projection is not None and qualified_name in self.metric_series.capabilities:
-                return projection(self.metric_series, params)
+                answered = projection(self.metric_series, params)
+                # The coverage disclosure is a disclosure, so a scenario that withholds them
+                # withholds this one too. `partial_month_false_premise` is the case: it exists
+                # to measure whether the analyst notices a truncated month unaided, and a note
+                # saying "these windows hold 12 days and 31" hands over its whole answer.
+                if qualified_name == "ga4__compare_periods" and self.compute_disclosures:
+                    answered.update(_coverage_for(self.metric_series, params))
+                return answered
         if self._names_another_project(qualified_name, params):
             # A PostHog project this tenant has and this scenario has no data in. The projects
             # listing advertises two -- `web-app` and `oss-client` -- and every capability
@@ -1282,7 +1290,7 @@ def _ga4_compare_periods(series: MetricSeries, params: dict[str, Any] | None) ->
                 "percent_change": _percent(now, before),
             }
         comparison.append(entry)
-    return {
+    payload = {
         "property_id": series.property_id,
         "current_period": {"start": current_start.isoformat(), "end": current_end.isoformat()},
         "previous_period": {"start": previous_start.isoformat(), "end": previous_end.isoformat()},
@@ -1291,6 +1299,32 @@ def _ga4_compare_periods(series: MetricSeries, params: dict[str, Any] | None) ->
         "row_count": len(comparison),
         "comparison": comparison,
     }
+    return payload
+
+
+def _coverage_for(series: MetricSeries, params: dict[str, Any] | None) -> dict[str, Any]:
+    """The connector's own coverage check, over the days this series actually holds.
+
+    Computed through the same function production calls, not hand-written: a fixture that states
+    its own disclosure passes whether or not the connector computes one, which is the mistake
+    `measurement_stopped` exists to avoid making twice.
+
+    Separate from the projection because it is a *disclosure*, and a scenario is allowed to
+    withhold those. `partial_month_false_premise` sets `compute_disclosures=False` precisely so
+    that noticing a truncated month stays a skill it measures rather than a note it hands over.
+    """
+    current_start, current_end = series.window(params, "current_start", "current_end")
+    previous_start, previous_end = series.window(params, "previous_start", "previous_end")
+    return (
+        _window_coverage(
+            [{"dimensions": {"date": day.isoformat()}} for day, _ in series.daily],
+            {
+                "current": (current_start.isoformat(), current_end.isoformat()),
+                "previous": (previous_start.isoformat(), previous_end.isoformat()),
+            },
+        )
+        or {}
+    )
 
 
 def _ga4_top_pages(series: MetricSeries, params: dict[str, Any] | None) -> dict[str, Any]:
