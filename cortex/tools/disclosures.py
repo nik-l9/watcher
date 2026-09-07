@@ -83,7 +83,7 @@ def series_disclosures(
         }
 
     if qualified == "posthog__event_trend":
-        from cortex.tools.posthog import _bucket_coverage, _series_gap
+        from cortex.tools.posthog import _bucket_coverage, _series_freshness, _series_gap
 
         start, end = params.get("start_date"), params.get("end_date")
         interval = params.get("interval", "day")
@@ -93,6 +93,12 @@ def series_disclosures(
         return {
             **(_bucket_coverage(rows, start, end, interval) or {}),
             **(_series_gap(rows, end, interval, as_of=horizon) or {}),
+            # The second clock. `_series_gap` asks the bucket grid whether a complete bucket
+            # went missing; this asks how stale the data is against the requested period, which
+            # is the question a coarse interval hides. Both, because they say different things
+            # and the granularity-dependent one alone let "the period is young" stand as the
+            # only reading of a pipeline that had been dead for 35 days.
+            **(_series_freshness(rows, end, as_of=horizon) or {}),
             **(
                 describe_movement(
                     rows,

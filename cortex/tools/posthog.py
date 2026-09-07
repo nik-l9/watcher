@@ -36,7 +36,7 @@ from typing import Any
 
 import httpx
 
-from cortex.analysis.coverage import gap_disclosure
+from cortex.analysis.coverage import freshness_disclosure, gap_disclosure
 from cortex.db.models import CredentialProvider
 from cortex.tools.base import (
     NEVER_EMPTY,
@@ -587,12 +587,14 @@ class PostHogTool(BaseTool):
             _reject_unsafe(breakdown_property, field="breakdown_property")
             select = (
                 f"SELECT toStartOf{interval.title()}(timestamp) AS bucket, "
-                f"properties.{_prop(breakdown_property)} AS segment, {aggregate} AS value"
+                f"properties.{_prop(breakdown_property)} AS segment, {aggregate} AS value, "
+                "max(timestamp) AS last_event"
             )
             group = "GROUP BY bucket, segment ORDER BY bucket, value DESC"
         else:
             select = (
-                f"SELECT toStartOf{interval.title()}(timestamp) AS bucket, {aggregate} AS value"
+                f"SELECT toStartOf{interval.title()}(timestamp) AS bucket, {aggregate} AS value, "
+                "max(timestamp) AS last_event"
             )
             group = "GROUP BY bucket ORDER BY bucket"
 
@@ -876,6 +878,53 @@ def _rollout(flag: dict[str, Any]) -> Any:
     return None
 
 
+def _last_event(rows: list[dict[str, Any]]) -> date | None:
+    """The latest moment this series actually recorded, from `max(timestamp)` per bucket.
+
+    Not the last bucket's start date, which is what the bucket grid sees and is up to a month
+    coarser. That difference is the whole point of the freshness disclosure: a monthly series
+    whose data died on 3 August has a final bucket labelled 1 August.
+    """
+    latest: date | None = None
+    for row in rows:
+        raw = row.get("last_event") or row.get("bucket")
+        if not isinstance(raw, str):
+            continue
+        try:
+            seen = date.fromisoformat(raw[:10])
+        except ValueError:
+            continue
+        if latest is None or seen > latest:
+            latest = seen
+    return latest
+
+
+def _series_freshness(
+    rows: list[dict[str, Any]], end_date: str, *, as_of: date | None = None
+) -> dict[str, Any] | None:
+    """How far short of the requested period this series' data actually reaches.
+
+    The companion to `_series_gap`, answering the question the bucket grid cannot -- see
+    `freshness_disclosure` for the investigation that needed it and did not get it.
+    """
+    if not rows:
+        return None
+    try:
+        window_end = date.fromisoformat(end_date)
+    except ValueError:
+        return None
+    return freshness_disclosure(
+        _last_event(rows),
+        window_end=window_end,
+        as_of=as_of,
+        alternatives=(
+            "Collection may be broken, the event may have been renamed, or it may genuinely "
+            "have stopped firing -- the sibling events in `blast_radius` are what separate a "
+            "shared pipeline failure from something specific to this event"
+        ),
+    )
+
+
 def _series_gap(
     rows: list[dict[str, Any]], end_date: str, interval: str, *, as_of: date | None = None
 ) -> dict[str, Any] | None:
@@ -905,7 +954,18 @@ def _series_gap(
 
     buckets: list[date] = []
     for row in rows:
-        raw = row.get("bucket")
+        # `last_event` in preference to `bucket`, and on a coarse interval that difference is
+        # the whole disclosure. A bucket carries the date its *period starts*, so a monthly
+        # series whose data died on 3 August has a final bucket of 1 August -- inside any range
+        # running past it, so no gap was reported at all. A live investigation asked for
+        # monthly signups through 7 September, was told nothing, saw a small August bucket and
+        # concluded "incomplete trailing month/data lag". The same world asked daily produced
+        # "no data after 2026-08-03 ... 35 days are missing entirely".
+        #
+        # So the comparison has to be against the data's own horizon rather than against the
+        # bucket grid. `max(timestamp)` per bucket costs nothing -- it is another aggregate on
+        # a query already being made.
+        raw = row.get("last_event") or row.get("bucket")
         if not isinstance(raw, str):
             continue
         try:

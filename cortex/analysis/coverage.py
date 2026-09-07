@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from datetime import date, timedelta
 from typing import Any
 
-__all__ = ["BUCKET_DAYS", "gap_disclosure"]
+__all__ = ["BUCKET_DAYS", "FRESHNESS_TOLERANCE_DAYS", "freshness_disclosure", "gap_disclosure"]
 
 #: How many days a whole bucket of each interval spans.
 #:
@@ -109,5 +109,70 @@ def gap_disclosure(
             f"same as a low value: {alternatives}. Do not compute a rate for the whole "
             "requested period from these rows, and do not treat the gap as a decline without "
             "establishing which of those it is."
+        ),
+    }
+
+
+#: How stale a source's data may be before staleness is worth saying out loud.
+#:
+#: Two days, and interval-independent on purpose. Any analytics pipeline runs a little behind --
+#: a daily series ending yesterday is the normal state of a live source, not a defect -- but
+#: nothing legitimate is a fortnight behind, whatever granularity it is being read at.
+FRESHNESS_TOLERANCE_DAYS = 2
+
+
+def freshness_disclosure(
+    last_event: date | None,
+    *,
+    window_end: date,
+    as_of: date | None = None,
+    alternatives: str,
+) -> dict[str, Any] | None:
+    """Whether the data reaches the end of the period that was asked about.
+
+    **The second clock, and the reason one is not enough.** `gap_disclosure` asks whether a
+    *complete bucket finished inside the range and reported nothing* -- the right question about
+    the bucket grid, and one that a coarse interval answers "no" to for a very long time. At
+    monthly granularity its tolerance is two spans, so a series whose collection died on 3
+    August can be read on 7 September and report no gap at all: August finished and August had
+    data in it.
+
+    That is exactly what happened. A live investigation asked for monthly signups through 7
+    September, was told nothing, saw a small August bucket, and wrote *"August's 580 ... likely
+    reflect an incomplete trailing month/data lag rather than a genuine drop"*. Collection had
+    stopped 35 days earlier, and 52 unrelated events had stopped with it. The same world asked
+    *daily* produced the full warning -- so the disclosure was granularity-dependent, which is
+    the one thing a data-quality warning must never be.
+
+    So this asks the other question, against the clock rather than the grid: **how far short of
+    the requested period does the data actually reach?** Interval-independent, because a
+    fortnight of missing data is a fortnight whether it is being read in days or months.
+
+    Deliberately not interpreted, like its neighbour. A stale source can mean a broken pipeline,
+    a renamed event, or a genuine stop; the connector reports the shortfall and the candidates,
+    and establishing which is the investigation's job. What it must not do is stay silent and
+    let "the period is young" be the only available reading.
+    """
+    if last_event is None:
+        return None
+    # A day that has not happened cannot be missing -- the same clamp `gap_disclosure` applies,
+    # and for the same reason: without it every question about the current period reports a
+    # collection failure for the part of it still in the future.
+    horizon = min(window_end, as_of) if as_of is not None else window_end
+    short_by = (horizon - last_event).days
+    if short_by <= FRESHNESS_TOLERANCE_DAYS:
+        return None
+    return {
+        "data_freshness": {
+            "last_event": last_event.isoformat(),
+            "period_end": horizon.isoformat(),
+            "days_short": short_by,
+        },
+        "data_freshness_note": (
+            f"The last recorded observation is {last_event.isoformat()}, {short_by} days before "
+            f"the {horizon.isoformat()} end of the period asked about. The period is not young; "
+            f"the data stops. {alternatives}. Any rate computed over the requested period from "
+            "these rows is divided by days the data does not cover, and a fall in the trailing "
+            "period is not evidence of a fall in the metric until the stop is explained."
         ),
     }
