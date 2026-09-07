@@ -2608,3 +2608,76 @@ class TestTheVarianceInstrumentActuallyRuns:
         assert trajectory.tool_sequence_similarity == 1.0
         assert trajectory.unanimous is True
         assert "reached the same answer on every attempt" in render_spread(spread)
+
+
+class TestTheDisclosureTwinIsAPair:
+    """A scenario beside the same scenario with one disclosure allowed through.
+
+    The decline twins price abstention: a gate that refuses everything looks like a gate that
+    works unless a should-answer case sits beside a should-decline one. This pair prices a
+    *disclosure*, and it exists because the measurement said the suite could not measure one.
+
+    `ga4.compare_periods` gained `window_coverage` after the same wrong headline appeared three
+    times. Auditing two forty-attempt captures then showed 34% and 28% of every
+    `compare_periods` call comparing windows of unequal coverage — and that the mistake is
+    systematic in exactly two scenarios: one already at 100% with no headroom, and one that
+    withholds every disclosure on purpose. So nothing both made the mistake and could see the
+    warning, and the disclosure was unmeasurable by construction.
+    """
+
+    PAIR = ("partial_month_false_premise", "partial_month_disclosed")
+
+    def test_the_worlds_are_identical(self) -> None:
+        """Same seed, same data, same question, same ground truth. Only what the connector is
+        allowed to say differs — otherwise the pair measures the data as well as the warning."""
+        parent, twin = (by_name(name) for name in self.PAIR)
+        assert twin.question == parent.question
+        assert twin.ground_truth == parent.ground_truth
+        assert twin.metric_series == parent.metric_series
+        assert twin.daily_truth == parent.daily_truth
+
+    def test_exactly_one_disclosure_differs(self) -> None:
+        """A bool would turn on four at once — `series_ends_early`, `partial_buckets`,
+        `data_trust` and the movement note — and a paired comparison would then attribute four
+        changes to one."""
+        parent, twin = (by_name(name) for name in self.PAIR)
+        assert parent.compute_disclosures is False
+        assert twin.compute_disclosures == frozenset({"window_coverage"})
+        for withheld in ("series_ends_early", "partial_buckets", "data_trust", "movement"):
+            assert not twin.discloses(withheld), withheld
+
+    def test_only_the_twin_is_told_its_windows_are_incomparable(self) -> None:
+        """The whole perturbation, at the payload the analyst actually reads."""
+        window = {
+            "current_start": "2026-08-01",
+            "current_end": "2026-08-31",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-07-31",
+        }
+        parent, twin = (by_name(name) for name in self.PAIR)
+        assert "window_coverage" not in parent.response_for("ga4__compare_periods", window)
+        coverage = twin.response_for("ga4__compare_periods", window)["window_coverage"]
+        assert coverage["comparable"] is False
+        assert coverage["current"]["days_with_data"] == 12
+        assert coverage["previous"]["days_with_data"] == 31
+
+    def test_the_warning_is_silent_where_the_windows_are_fair(self) -> None:
+        """Otherwise the twin is not a truncation twin, it is a scenario with a note on every
+        comparison — and a note that appears everywhere is not read on the one that matters."""
+        fair = {
+            "current_start": "2026-07-16",
+            "current_end": "2026-07-31",
+            "previous_start": "2026-07-01",
+            "previous_end": "2026-07-15",
+        }
+        twin = by_name("partial_month_disclosed")
+        assert "window_coverage" not in twin.response_for("ga4__compare_periods", fair)
+
+    def test_both_halves_still_have_a_false_premise_to_refuse(self) -> None:
+        """Without that, the pair measures nothing: the parent must be able to fail by accepting
+        the premise, and the twin must have the same thing to get right."""
+        for name in self.PAIR:
+            truth = by_name(name).ground_truth
+            assert by_name(name).difficulty is Difficulty.FALSE_PREMISE
+            assert truth.refutation_signals
+            assert not truth.is_unanswerable
