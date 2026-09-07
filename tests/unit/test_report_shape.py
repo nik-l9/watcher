@@ -474,3 +474,21 @@ class TestTheCompoundClaimRule:
 
         text = _drafting_instruction("Why did signups fall?", [uuid.uuid4()], "confident")
         assert "state only the half you can establish" in text.lower()
+
+    def test_the_instruction_asks_for_a_finding_not_the_question(self) -> None:
+        """Reason-before-verdict only works if the reason is a reason.
+
+        `premise_checked` used to ask for "the assertion you tested", and across twenty
+        attempts at one scenario every single one wrote the question back — *"Signups fell in
+        August 2026 compared to July 2026."* A faithful restatement carrying no finding, so
+        moving `premise` after it bought the verdict an input that says nothing, and two of
+        those twenty still set a verdict their own summary contradicted.
+
+        Asserted on the prose rather than on an outcome because the outcome needs sixty
+        attempts a side to measure and this does not: what the field asks for is a fact about
+        the instruction.
+        """
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "write what checking" in guidance and "*found*" in guidance, shape
+            assert "Do not write the question back" in guidance, shape
