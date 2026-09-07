@@ -295,7 +295,25 @@ class Scenario:
     #: with no help at all. Once the connector discloses it, that scenario stops measuring the
     #: skill and starts measuring compliance -- both worth knowing, and the disclosure is
     #: already unit-tested, so the scarcer one wins here.
-    compute_disclosures: bool = True
+    #:
+    #: **A frozenset lets exactly those disclosures through**, which is what makes one of them
+    #: measurable. A bool prices the whole set at once: turning it on for the truncation
+    #: scenario would hand over `series_ends_early`, `partial_buckets`, `data_trust` and the
+    #: movement note along with the coverage warning, so a paired comparison against it would
+    #: measure four changes and attribute them to one. Naming a set is one perturbation, which
+    #: is the same discipline the decline twins are built on.
+    compute_disclosures: bool | frozenset[str] = True
+
+    def discloses(self, name: str) -> bool:
+        """Whether this scenario lets the connector's `name` disclosure reach the analyst."""
+        if isinstance(self.compute_disclosures, bool):
+            return self.compute_disclosures
+        return name in self.compute_disclosures
+
+    @property
+    def discloses_anything(self) -> bool:
+        """Whether any disclosure is allowed through, so a caller can skip computing them."""
+        return bool(self.compute_disclosures)
 
     #: The scenario's GA4 world as one daily session series plus how it divides. See
     #: `MetricSeries`. Every `ga4__*` capability it declares is projected from this, so the
@@ -435,7 +453,7 @@ class Scenario:
                 # withholds this one too. `partial_month_false_premise` is the case: it exists
                 # to measure whether the analyst notices a truncated month unaided, and a note
                 # saying "these windows hold 12 days and 31" hands over its whole answer.
-                if qualified_name == "ga4__compare_periods" and self.compute_disclosures:
+                if qualified_name == "ga4__compare_periods" and self.discloses("window_coverage"):
                     answered.update(_coverage_for(self.metric_series, params))
                 return answered
         if self._names_another_project(qualified_name, params):
@@ -2605,6 +2623,38 @@ def _event_catalogue() -> dict[str, Any]:
     }
 
 
+def partial_month_disclosed(seed: int = 4) -> Scenario:
+    """The truncation case with the coverage warning turned on, and nothing else.
+
+    **Built because the measurement said the suite could not measure the thing it had just
+    shipped.** `ga4.compare_periods` gained a `window_coverage` disclosure after the same wrong
+    headline appeared three times -- twelve days of August compared against thirty-one of July,
+    reported as a 61.8% decline. Auditing two forty-attempt captures then showed that **34% and
+    28% of every `compare_periods` call in the suite compared windows of unequal coverage**, and
+    that the mistake is systematic in exactly two scenarios: `measurement_stopped`, which was
+    already scoring 100% and had no headroom to show an improvement, and
+    `partial_month_false_premise`, which withholds every disclosure on purpose.
+
+    So no scenario both made the mistake and was allowed to see the warning, and the
+    disclosure's effect was unmeasurable by construction. That is a gap in the eval rather than
+    a fact about the disclosure.
+
+    This is the same world as its parent with one thing changed: `window_coverage` is allowed
+    through, and every other disclosure stays withheld. The pair prices the warning the way the
+    decline twins price abstention -- the parent measures whether the analyst notices a
+    truncated month unaided, the twin measures whether it acts on being told.
+
+    The seed is the parent's, for the reason every twin here shares one: a different seed
+    changes the planted series, and then the pair differs in the perturbation *and* in the
+    data.
+    """
+    return dataclasses.replace(
+        partial_month_false_premise(seed=seed),
+        name="partial_month_disclosed",
+        compute_disclosures=frozenset({"window_coverage"}),
+    )
+
+
 def tempting_coincidence(seed: int = 5) -> Scenario:
     """A real movement, a change on the same day, and no way to connect them.
 
@@ -3127,6 +3177,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     campaign_traffic_drop(),
     insufficient_evidence(),
     partial_month_false_premise(),
+    # Its disclosure twin, differing in one allowed disclosure. See `partial_month_disclosed`.
+    partial_month_disclosed(),
     tempting_coincidence(),
     measurement_stopped(),
     # The decline twins, each derived from the scenario above it. They roughly double the cost
