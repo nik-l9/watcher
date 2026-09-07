@@ -20,7 +20,14 @@ from __future__ import annotations
 
 import pytest
 
-from cortex.eval.variance import ALPHA, POWER, DimensionSpread, Spread, render_spread
+from cortex.analysis.identifiability import _z
+from cortex.eval.variance import (
+    ALPHA,
+    POWER,
+    DimensionSpread,
+    Spread,
+    render_spread,
+)
 
 
 def _dimension(
@@ -44,14 +51,90 @@ def _dimension(
     )
 
 
+class TestAttemptsBuyPower:
+    """The correction, and it governed every claim made from this module.
+
+    `paired_mde` read `2.80 * sigma_attempt * sqrt(2 / scenarios)` -- the *unpaired* two-arm
+    variance with the attempt count silently fixed at one. It reported 0.262 for a suite
+    measured at five attempts, when five attempts give 0.117, and improvements between 12 and
+    26 points were dismissed as noise on the strength of it. Worse, it made "more attempts buy
+    no power" look like a property of the design rather than an artifact of `K = 1`.
+
+    Miller, *Adding Error Bars to Evals* (arXiv:2411.00640): variance decomposes into
+    between-question difficulty, irreducible by resampling, and within-question sampling noise,
+    which `K` samples divide. Pairing -- the same scenarios both sides -- cancels the first,
+    leaving the second over `K`.
+    """
+
+    def test_more_attempts_detect_a_smaller_shift(self) -> None:
+        one = _dimension(scenarios=8, attempts=8).paired_mde
+        five = _dimension(scenarios=8, attempts=40).paired_mde
+        assert five < one
+        # 1/sqrt(K), so five attempts is sqrt(5) tighter than one.
+        assert one / five == pytest.approx(5**0.5, rel=1e-6)
+
+    def test_the_old_formula_is_recovered_at_one_attempt(self) -> None:
+        """The bug was not the formula, it was the missing K. At K=1 the two agree, which is
+        why nothing looked wrong: every number it ever printed was the K=1 case."""
+        single = _dimension(sigma_attempt=0.187, scenarios=8, attempts=8)
+        assert single.paired_mde == pytest.approx(
+            (_z(1 - ALPHA / 2) + _z(POWER)) * 0.187 * (2 / 8) ** 0.5, rel=1e-9
+        )
+
+    def test_it_reports_the_attempts_needed_for_a_target(self) -> None:
+        """The question a reader has after seeing a floor, which the old formula could not
+        answer: the suite that read 0.262 needed seven attempts on its existing scenarios to
+        reach 0.10, not the fifty-five scenarios previously calculated."""
+        dimension = _dimension(sigma_attempt=0.187, scenarios=8, attempts=8)
+        assert dimension.attempts_for(0.10) == 7
+        assert dimension.attempts_for(0.05) == 28
+        # A target already met needs one attempt, not zero or a negative.
+        assert dimension.attempts_for(1.0) == 1
+
+    def test_a_nonsense_target_does_not_divide_by_zero(self) -> None:
+        assert _dimension().attempts_for(0.0) == 0
+        assert _dimension(sigma_attempt=0.0).attempts_for(0.1) == 0
+
+
+class TestWhichLeverBinds:
+    """ICC, so a reader knows whether to buy attempts or scenarios.
+
+    The agent-eval literature disagrees about which component dominates -- arXiv:2607.13304 and
+    arXiv:2605.08261 find coverage axes beat repeats by an order of magnitude, EVA-Bench
+    (arXiv:2605.13841) finds trial variance exceeds scenario variance on every metric it
+    measures. So it is reported rather than assumed.
+    """
+
+    def test_all_scenario_difficulty_reads_one(self) -> None:
+        assert _dimension(sigma_attempt=0.0, sigma_scenario=0.2).icc == 1.0
+
+    def test_all_run_to_run_noise_reads_zero(self) -> None:
+        assert _dimension(sigma_attempt=0.2, sigma_scenario=0.0).icc == 0.0
+
+    def test_a_deterministic_dimension_has_no_ratio_to_report(self) -> None:
+        """Rather than a division by zero. Nothing varies, so nothing needs attributing."""
+        assert _dimension(sigma_attempt=0.0, sigma_scenario=0.0).icc == 0.0
+
+    def test_equal_components_read_a_half(self) -> None:
+        assert _dimension(sigma_attempt=0.15, sigma_scenario=0.15).icc == pytest.approx(0.5)
+
+
 class TestTheDetectableDifference:
     def test_more_scenarios_detect_a_smaller_shift(self) -> None:
-        """The only lever available without reducing the noise itself."""
-        few = _dimension(scenarios=4).paired_mde
-        many = _dimension(scenarios=16).paired_mde
+        """One of *two* levers, and this test used to imply it was the only one.
+
+        Attempts per scenario have to be held fixed to isolate the scenario count -- the first
+        version compared `scenarios=4` against `scenarios=16` at a fixed *total* of fifteen
+        attempts, which quietly cut attempts-per-scenario by four at the same time and made the
+        two effects cancel. The `attempts` argument is a total, so it scales with the scenario
+        count here.
+        """
+        few = _dimension(scenarios=4, attempts=4 * 5).paired_mde
+        many = _dimension(scenarios=16, attempts=16 * 5).paired_mde
         assert many < few
         # Halving the MDE takes four times the scenarios, which is the sqrt in the formula and
-        # the reason "add a couple more scenarios" is not a plan.
+        # the reason "add a couple more scenarios" is not a plan. Four times the *attempts* on
+        # the scenarios you have does the same thing, which is usually cheaper.
         assert few / many == pytest.approx(2.0, rel=0.01)
 
     def test_a_noisier_dimension_needs_a_bigger_shift(self) -> None:
@@ -72,8 +155,9 @@ class TestTheDetectableDifference:
         while the docstring keeps claiming the old numbers."""
         from cortex.analysis.identifiability import _z
 
-        dimension = _dimension(sigma_attempt=0.1, scenarios=8)
-        expected = (_z(1 - ALPHA / 2) + _z(POWER)) * 0.1 * (2 / 8) ** 0.5
+        dimension = _dimension(sigma_attempt=0.1, scenarios=8, attempts=8 * 5)
+        # Miller's paired form: the difficulty term cancels, leaving attempt noise over K.
+        expected = (_z(1 - ALPHA / 2) + _z(POWER)) * (2 * 0.1**2 / 5 / 8) ** 0.5
         assert dimension.paired_mde == pytest.approx(expected)
         assert (ALPHA, POWER) == (0.05, 0.80)
 

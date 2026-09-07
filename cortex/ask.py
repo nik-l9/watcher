@@ -162,7 +162,14 @@ def _cites(ids: list[uuid.UUID], known: dict[uuid.UUID, str]) -> str:
     return f"  [{', '.join(_short(i, known) for i in ids)}]" if ids else ""
 
 
-def render(report: InvestigationReport, *, steps: int, seconds: float, tokens: int) -> str:
+def render(
+    report: InvestigationReport,
+    *,
+    steps: int,
+    seconds: float,
+    tokens: int,
+    gathered: int | None = None,
+) -> str:
     known = {s.evidence_id: f"{s.tool_name}.{s.capability}" for s in report.sources}
     out: list[str] = [
         "",
@@ -171,8 +178,18 @@ def render(report: InvestigationReport, *, steps: int, seconds: float, tokens: i
         "=" * 78,
         "",
         f"Confidence: {report.confidence.value.replace('_', ' ')}",
+        # **Both counts, because the gap between them is the interesting one.** This line
+        # said "N observations gathered" and printed `len(report.sources)`, which is the number
+        # *cited*. A live report gathered eleven and cited four; the line read "4 observations
+        # gathered" and hid the seven the answer did not rest on. That gap is exactly what
+        # arXiv:2608.23623 gates completion on -- every answer slot bound to receipts -- so
+        # concealing it removed the reader's only view of it.
         f"Took {seconds:.0f}s over {steps} steps, {tokens:,} tokens, "
-        f"{len(report.sources)} observations gathered",
+        + (
+            f"{gathered} observations gathered, {len(report.sources)} cited"
+            if gathered is not None
+            else f"{len(report.sources)} observations cited"
+        ),
         "",
         "ANSWER",
         "-" * 78,
@@ -427,6 +444,7 @@ async def _main(argv: list[str] | None = None) -> int:
             steps=len(investigation.steps),
             seconds=investigation.duration_ms / 1000,
             tokens=investigation.usage.total,
+            gathered=len(investigation.evidence_ids),
         )
     )
 
@@ -657,6 +675,7 @@ async def _ask_real(args: argparse.Namespace) -> int:
             steps=len(investigation.steps),
             seconds=investigation.duration_ms / 1000,
             tokens=investigation.usage.total,
+            gathered=len(investigation.evidence_ids),
         )
     )
     # The phase breakdown, on the real path too. It printed only for fixture runs, which is
