@@ -29,9 +29,10 @@ Nothing here calls a provider. It reads bundles.
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,12 +78,81 @@ class DimensionSpread:
     attempts: int
 
     @property
+    def attempts_per_scenario(self) -> float:
+        """Mean attempts behind each scenario's mean. The `K` the detection floor divides by."""
+        return self.attempts / self.scenarios if self.scenarios else 0.0
+
+    @property
     def paired_mde(self) -> float:
-        """Smallest mean shift a paired before/after could detect, per scenario count."""
-        if self.sigma_attempt == 0.0 or self.scenarios == 0:
+        """Smallest mean shift a paired before/after could detect at this attempt count.
+
+        **This was wrong, in a way that governed every claim made from it.** The formula read
+        `2.80 * sigma_attempt * sqrt(2 / scenarios)`, which is the *unpaired two-arm* variance
+        `2·sigma^2` with the attempt count silently fixed at one. Two consequences, both
+        material:
+
+          - It reported 0.262 for a suite measured at five attempts, when the correct figure
+            for five attempts is 0.117. Improvements between 12 and 26 points were dismissed
+            as noise on the strength of it.
+          - It made "more attempts buy no power" look like a property of the design. That is
+            an artifact of `K = 1`: the attempt-level variance component divides by `K`, so
+            reaching a 10-point floor needs about **seven attempts on the eight scenarios that
+            already exist**, not the fifty-five scenarios previously calculated.
+
+        The reference decomposition is Evan Miller, *Adding Error Bars to Evals*
+        (arXiv:2411.00640, 2024): `Var(mean) = (Var(x) + E[sigma_i^2]) / n`, where `Var(x)` is
+        between-question difficulty -- irreducible by resampling -- and `E[sigma_i^2]` is
+        within-question sampling noise, which `K` samples per question divide.
+
+        **Pairing is what removes the difficulty term.** Run the same scenarios on both sides
+        and `Var(x)` cancels, leaving `2 * sigma_attempt^2 / K` per scenario. That is the
+        formula below. It assumes the two sides have equal attempt-level variance and are
+        independent given the scenario, which is the right model for re-running one suite and
+        the wrong one for comparing two different suites -- `sigma_scenario` is reported beside
+        this precisely so an unpaired comparison cannot borrow this number.
+
+        Miller also bounds what `K` can buy: for uniformly distributed binary difficulty the
+        variance ratio is `(1 + 2/K) / 3`, so 33% reduction at `K = 2` against a 67%
+        asymptotic ceiling, with returns thinning by `K` of four to six. Attempts are not free
+        power, but they are not zero power either.
+        """
+        attempts = self.attempts_per_scenario
+        if self.sigma_attempt == 0.0 or self.scenarios == 0 or attempts <= 0:
             return 0.0
         coefficient = _z(1 - ALPHA / 2) + _z(POWER)
-        return coefficient * self.sigma_attempt * (2 / self.scenarios) ** 0.5
+        return coefficient * (2 * self.sigma_attempt**2 / attempts / self.scenarios) ** 0.5
+
+    @property
+    def attempts_for(self) -> Callable[[float], int]:
+        """How many attempts per scenario a target detection floor needs, at this noise.
+
+        Inverting the formula above. Reported because the question a reader has after seeing a
+        floor is always "what would it take to halve it", and the answer -- attempts, not
+        scenarios -- is the one the old formula could not give.
+        """
+
+        def _needed(target: float) -> int:
+            if target <= 0 or self.sigma_attempt == 0.0 or self.scenarios == 0:
+                return 0
+            coefficient = _z(1 - ALPHA / 2) + _z(POWER)
+            return math.ceil(
+                2 * (coefficient * self.sigma_attempt) ** 2 / (self.scenarios * target**2)
+            )
+
+        return _needed
+
+    @property
+    def icc(self) -> float:
+        """Share of variance that is scenario difficulty rather than run-to-run noise.
+
+        `sigma_scenario^2 / (sigma_scenario^2 + sigma_attempt^2)`, the intraclass correlation
+        the agent-eval literature reports (arXiv:2512.06710 measures 0.30-0.77 across GAIA and
+        FRAMES). It says which lever binds: near 1, the scenarios differ and more attempts buy
+        little; near 0, the same scenario answers differently each time and attempts are the
+        cheaper fix than more scenarios.
+        """
+        total = self.sigma_scenario**2 + self.sigma_attempt**2
+        return round(self.sigma_scenario**2 / total, 4) if total else 0.0
 
     @property
     def deterministic(self) -> bool:
@@ -412,13 +482,14 @@ def render_spread(spread: Spread) -> str:
         "=" * 72,
         f"{len(spread.scenarios)} scenario(s), {'/'.join(str(c) for c in counts)} attempt(s) each",
         "",
-        f"{'dimension':<18}{'mean':>7}{'sig_att':>9}{'sig_scen':>10}{'stable':>8}{'MDE':>8}",
+        f"{'dimension':<18}{'mean':>7}{'sig_att':>9}{'sig_scen':>10}{'ICC':>7}"
+        f"{'stable':>8}{'MDE':>8}",
         "-" * 72,
     ]
     for dimension in sorted(spread.dimensions, key=lambda d: -d.sigma_attempt):
         lines.append(
             f"{dimension.name:<18}{dimension.mean:>7.3f}{dimension.sigma_attempt:>9.3f}"
-            f"{dimension.sigma_scenario:>10.3f}"
+            f"{dimension.sigma_scenario:>10.3f}{dimension.icc:>7.2f}"
             f"{dimension.stable_scenarios:>5}/{dimension.scenarios:<2}"
             f"{dimension.paired_mde:>8.3f}"
         )
@@ -428,9 +499,25 @@ def render_spread(spread: Spread) -> str:
     if noisy:
         worst = max(noisy, key=lambda d: d.paired_mde)
         lines.append(
-            f"Noisiest: {worst.name}. A paired before/after over "
-            f"{worst.scenarios} scenario(s) cannot detect a mean shift smaller than "
-            f"{worst.paired_mde:.3f} on it. Anything smaller is the dice."
+            f"Noisiest: {worst.name}. A paired before/after over {worst.scenarios} "
+            f"scenario(s) at {worst.attempts_per_scenario:.0f} attempt(s) each cannot detect a "
+            f"mean shift smaller than {worst.paired_mde:.3f} on it. Anything smaller is the "
+            "dice."
+        )
+        # The question a reader always has next, and the one the old formula could not answer
+        # because it had fixed the attempt count at one.
+        for target in (0.10, 0.05):
+            if target < worst.paired_mde:
+                lines.append(
+                    f"  To reach {target:.2f} on it: {worst.attempts_for(target)} attempt(s) "
+                    f"per scenario on these same {worst.scenarios}, no new scenarios needed."
+                )
+                break
+        lines.append(
+            "MDE divides by the attempt count, so attempts buy power -- Miller "
+            "(arXiv:2411.00640) bounds the gain at 33% variance reduction by K=2 against a 67% "
+            "ceiling, thinning by K of four to six. ICC says which lever binds: high is "
+            "scenario difficulty, low is run-to-run noise."
         )
     deterministic = [d.name for d in spread.dimensions if d.deterministic]
     if deterministic:
