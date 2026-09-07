@@ -141,15 +141,19 @@ _PREMISE_CHECK = (
     "report that was technically accurate throughout. If a comparison looks alarming only "
     "because the periods are different lengths, or the data is incomplete, or the metric "
     "changed definition, that *is* the answer rather than a caveat on it.\n"
-    "**Set `premise_checked` first, then `premise`.** Write the assertion you tested, then "
-    "your verdict on it -- `false` when the evidence contradicts it, `unverifiable` when the "
-    "evidence cannot settle it, `holds` when it is supported. In that order, because the "
-    "verdict is a judgement about the sentence above it: an attempt that answered the verdict "
-    'first set `holds` and then wrote "No -- signups did not fall", and the field is what a '
-    "reader and a scorer both take as the answer. Putting the verdict in a field rather than "
-    "only in prose is what lets a reader see at a glance whether the question itself survived, "
-    "instead of inferring it from how the first sentence happens to be phrased -- which only "
-    "works while the field agrees with the prose."
+    "**Set `premise_checked` first, then `premise`.** In `premise_checked` write what checking "
+    "the assertion *found* -- the figures that settled it and over what window. Do not write "
+    'the question back: "signups fell in August versus July" is the assertion, not a '
+    'finding, and a verdict written after it has nothing to go on. "August holds 12 days of '
+    "data against July's 31; the daily rate is flat at ~157\" is a finding. Then `premise`: "
+    "`false` when the evidence contradicts the assertion, `unverifiable` when it cannot settle "
+    "it, `holds` when it is supported. In that order, because the verdict is a judgement about "
+    "the sentence above it -- an attempt that answered the verdict first set `holds` and then "
+    'wrote "No -- signups did not fall", and the field is what a reader and a scorer both take '
+    "as the answer. Putting the verdict in a field rather than only in prose is what lets a "
+    "reader see at a glance whether the question itself survived, instead of inferring it from "
+    "how the first sentence happens to be phrased -- which only works while the field agrees "
+    "with the prose."
 )
 
 

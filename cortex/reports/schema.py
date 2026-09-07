@@ -440,8 +440,16 @@ class InvestigationReport(_Strict):
     # can assert -- it is a claim about the constrained decoder, verifiable only by a live run.
     # The `Claim.text` floor is the protection that does not depend on it being true.
     question: str = Field(min_length=1, max_length=2000)
-    #: The assertion the report tested, so a reader can see what was checked -- and so the
-    #: verdict below is written after its own input rather than before it.
+    #: What the check found, so a reader can see the basis for the verdict -- and so the verdict
+    #: below is written after its own input rather than before it.
+    #:
+    #: **"What was checked" was not enough, and the measurement is why.** This field used to ask
+    #: for "the assertion you tested", and across twenty attempts at one scenario every single
+    #: one wrote the question back: *"Signups fell in August 2026 compared to July 2026."* Which
+    #: is a faithful restatement and carries no finding at all -- so moving `premise` after it
+    #: bought the verdict an input that says nothing, and two of those twenty still set a
+    #: verdict their own summary contradicted. Reason-before-verdict only works if the reason
+    #: is a reason.
     #:
     #: 1,000 rather than the 500 this shipped with. A live attempt was **discarded** over the cap:
     #: the model wrote "The question asserts a 3%... general, tenant-wide dip", the repair retry
@@ -449,6 +457,9 @@ class InvestigationReport(_Strict):
     #: times. A constraint the model cannot satisfy on retry is not enforcing brevity, it is
     #: throwing away completed investigations -- and 500 was out of line with its neighbours
     #: anyway, where a hypothesis statement gets 1,000 and its reasoning 2,000.
+    #: No `description`: the instruction lives in `cortex.reports.shape` for the reason given
+    #: on `premise` below, and a first attempt at putting it here broke the 7,000-byte grammar
+    #: budget that `test_the_schema_stays_within_the_grammar_budget` guards.
     premise_checked: str = Field(default="", max_length=1000)
     #: Whether the question's own assertion survived checking.
     #: Terse on purpose. The full instruction lives in `cortex.reports.shape`, which reaches the
