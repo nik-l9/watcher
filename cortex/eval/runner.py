@@ -110,7 +110,7 @@ class ScenarioTool(Tool):
             # differently on each side of it. Without this every period gets the same
             # payload, which is how the campaign fixture came to contradict itself.
             payload = dict(self._scenario.response_for(qualified, params))
-            if self._scenario.compute_disclosures:
+            if self._scenario.discloses_anything:
                 # The same assembler production uses. Without this the suite measured none of
                 # them: this handler replaces the connector method, so `series_ends_early`,
                 # `partial_buckets`, `data_trust` and the movement description never reached a
@@ -120,7 +120,10 @@ class ScenarioTool(Tool):
                 # and measures the wrong thing -- whether the analyst reacts to a disclosure,
                 # not whether the connector computes one. A fixture author who forgets looks
                 # exactly like a connector that does not disclose.
-                payload.update(
+                # Filtered by name, so a scenario can allow one disclosure and withhold the
+                # rest. Pricing a single disclosure needs that: a bool turns on four at once
+                # and a paired comparison then attributes four changes to one.
+                found = dict(
                     series_disclosures(
                         qualified,
                         payload,
@@ -132,7 +135,10 @@ class ScenarioTool(Tool):
                         as_of=self._scenario.as_of,
                     )
                 )
-                payload.update(grade_series(qualified, payload))
+                found.update(grade_series(qualified, {**payload, **found}))
+                payload.update(
+                    {key: value for key, value in found.items() if self._scenario.discloses(key)}
+                )
             return ToolResult(
                 payload={**payload, "_eval_params": params},
                 source_ref=f"eval://{qualified}",
