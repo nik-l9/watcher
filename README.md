@@ -30,7 +30,11 @@ Try it against a dataset whose true cause is known, before wiring up anything of
 $ watcher ask --dataset campaign_traffic_drop --show-truth
 ```
 
-Apache-2.0. Runs locally under Docker Compose, and on GCP.
+**AGPL-3.0, or a commercial licence.** Fork it, run it for yourself, run it for your company —
+the AGPL asks nothing of you. It asks only of someone who offers watcher *to third parties as a
+hosted service*, who must then release their whole service under the same terms. If that is you
+and you would rather not, [a commercial licence is available](#licence). Runs locally under
+Docker Compose, and on GCP.
 
 **Status: public beta (0.1.0).** The grounding guarantee above is measured and holds. What is
 still moving is breadth and route stability — the same question can take a different path each
@@ -294,6 +298,37 @@ trusted — and the parts that are enforced are enforced in code rather than ask
   connector breadth, and the investigation method itself.
 - `make eval` scores the analyst against labelled fixtures where the true cause is planted and
   the decoys are chosen to punish the obvious-but-wrong answer.
+
+## Licence
+
+**AGPL-3.0-or-later** ([`LICENSE`](LICENSE)), with a commercial licence available.
+
+The practical difference, because AGPL has a reputation that outruns what it restricts:
+
+| What you are doing | What the AGPL asks |
+|---|---|
+| `pip install watcher-gtm`, ask questions about your own data | nothing |
+| Fork it, modify it, run it inside your company | nothing |
+| Run it for your team, your clients' data, your own product's analytics | nothing |
+| Offer watcher itself to third parties as a hosted service | release your whole service under AGPL — or take a commercial licence |
+
+That last row is the only one that differs from Apache-2.0, and it is deliberate: the work in
+here is the grounding stack, and the intent is that people can use it freely while someone
+reselling it as a service either contributes back or pays.
+
+**Commercial licences** — for hosting watcher as a service without the AGPL's reciprocity, or
+where your legal team will not accept AGPL at all — are available. Open an issue or email the
+address in `pyproject.toml`.
+
+**Contributions** are accepted under the same AGPL-3.0 terms. If a contributor licence agreement
+becomes necessary for the dual-licensing to work cleanly, it will be added before, not after, the
+first outside contribution is merged — retroactive relicensing needs every contributor's consent
+and is how dual-licensed projects get stuck.
+
+**The datastores are a separate question** and the analysis is in
+[`docs/licensing.md`](docs/licensing.md): two of the four are source-available rather than open
+source, which constrains a *hosted* launch and not self-hosting. It names three routes out, the
+cheapest being Redis → Valkey.
 
 ## Contributing
 

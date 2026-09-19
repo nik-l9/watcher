@@ -6,14 +6,14 @@ name = "watcher-gtm"
 version = "0.1.0"
 description = "An AI GTM data analyst that investigates rather than reporting numbers."
 readme = "README.md"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
 keywords = ["analytics", "agents", "llm", "gtm", "root-cause-analysis", "grounding"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3.12",
     "Topic :: Office/Business",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
