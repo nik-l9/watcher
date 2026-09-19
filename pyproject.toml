@@ -33,7 +33,7 @@ dependencies = [
     # receives an unexpected `himport_registry` kwarg through redis's own deprecation
     # wrapper, and every graph call fails with a TypeError. Found when `uv add duckdb`
     # re-resolved the lockfile and silently upgraded a package unrelated to the change.
-    "redis>=5.2,<8.1",
+    "redis>=5.2,<8.2",
     "celery>=5.4",
     "cryptography>=43.0",
     "structlog>=24.4",
@@ -80,7 +80,7 @@ dev = [
     # Exact, not a range. A formatter decides what "formatted" means, so a range makes that
     # property unstable: 0.16.0 and 0.16.4 disagreed about two files in this tree, which is
     # enough for CI to fail a branch a developer had just formatted. Bump deliberately.
-    "ruff==0.16.4",
+    "ruff==0.16.7",
     "psycopg[binary]>=3.2",
     # `tests/reports/test_schema.py` reads `MaxLen` out of pydantic field metadata to assert
     # a cap. Guaranteed present as a pydantic requirement, declared anyway: a direct import
