@@ -91,10 +91,12 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks git --no-banner --redact --exit-code 1 .
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Was `curl -LsSf https://astral.sh/uv/install.sh | sh` -- an unpinned fetch-and-execute
+      # of a remote script on every run, which is precisely the class of thing SHA-pinning the
+      # other actions exists to prevent. Whoever controls that URL controlled this job.
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.25"
 
       # A lockfile that has drifted from pyproject.toml is worse than none: `uv sync` would
       # quietly re-resolve and CI would stop testing the versions the lock names.
