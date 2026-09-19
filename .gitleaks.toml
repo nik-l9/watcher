@@ -1,0 +1,25 @@
+# Secret scanning config for `gitleaks git` in CI.
+#
+# The scan runs over the **whole history**, not the working tree: a key that was committed and
+# later deleted is still in the pack and still exploitable by anyone who clones. Scanning HEAD
+# alone finds only the case that does not matter.
+
+[extend]
+useDefault = true
+
+# Test fixtures that look like Slack tokens on purpose. Every one of these sits in a test
+# asserting that a token does *not* leak -- `assert "xoxb-super-secret" not in detail` -- so a
+# scanner flagging them would train the maintainer to ignore the scanner, which is the failure
+# mode an allowlist exists to prevent.
+#
+# Deliberately narrow: literal strings, not a pattern like `xoxb-.*`. A regex over the whole
+# token shape would hide a real leak that happened to land in a test file.
+[allowlist]
+description = "Fake Slack tokens in tests that assert redaction"
+regexTarget = "match"
+regexes = [
+  '''xoxb-super-secret''',
+  '''xoxb-round-trip''',
+  '''xoxp-search-token''',
+]
+paths = ['''^tests/''']

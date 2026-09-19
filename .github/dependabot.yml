@@ -1,0 +1,29 @@
+# Dependency updates, and the reason the schedule is weekly rather than daily.
+#
+# A daily cadence on a solo-maintained project produces more pull requests than get reviewed,
+# and an unreviewed dependency bump is how a supply-chain compromise gets merged. Weekly, with
+# minor and patch updates grouped into one PR, keeps the review a single readable diff.
+#
+# `github-actions` is listed because actions are pinned to commit SHAs here. A SHA cannot be
+# repointed by an attacker -- which is the point -- but it also cannot pick up a security fix on
+# its own, so something has to tell us the pin is stale. This is that something.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
