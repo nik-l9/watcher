@@ -34,7 +34,19 @@ event names and CRM fields, and feeds them to a model. **Anyone who can write in
 can write into the model's context.** A colleague, a contractor, an external user filing an issue
 on a public repository — all of them can author text the agent will read.
 
-What that cannot do, structurally:
+**Spotlighting does not fix this, and neither does a classifier.** Delimiting untrusted text,
+tagging it, or screening it with a detector model are the obvious answers and they are measured
+failures: Nasr, Carlini et al. ([arXiv:2510.09023](https://arxiv.org/abs/2510.09023)) broke
+twelve published defences under adaptive attack — spotlighting at 95%+ attack success, detector
+models above 90%, training-based defences at 100%, with human red-teamers succeeding every time.
+OWASP's own LLM01 entry concedes it is "unclear if there are fool-proof methods of prevention".
+So this project ships none of them and does not claim a mitigation it does not have.
+
+What it ships instead are bounds on what a successful injection can *reach*. Each is asserted in
+`tests/unit/test_security_invariants.py`, because a property that either holds or does not is
+worth more here than an attack-success-rate that improves with the next paper.
+
+What an injection cannot do, structurally:
 
 - **It cannot make the agent change anything.** Every capability is read-only, and that is
   enforced at construction rather than by convention: a capability declaring `read_only=False`
@@ -42,8 +54,19 @@ What that cannot do, structurally:
 - **It cannot reach another tenant.** Graph-per-tenant, per-tenant vector collections, and a
   tenant predicate on every query, with the isolation suite in `tests/tenancy/` gating any
   release.
-- **It cannot exfiltrate to an attacker-chosen destination.** Connectors call fixed API hosts;
-  no URL from model output or tool output is fetched.
+- **It cannot choose where data goes.** Connectors build their base URL from fixed provider
+  hosts. The one URL a tenant supplies — an MCP server — is validated against the address it
+  resolves to, rejecting loopback, RFC1918, CGNAT, link-local (which is where every cloud
+  metadata service lives) and their IPv6 forms, including the `::ffff:` mapped bypass.
+- **It cannot redirect an answer.** The Slack reply target is read from the event envelope, not
+  from any text. A question asked in a channel is answered in that channel, so an injected
+  instruction cannot post your data somewhere the attacker can read that they could not read
+  already.
+- **It cannot spend without bound.** Every limit on an investigation — steps, tool calls, tokens,
+  seconds — is required and individually capped; a `Budget` missing one cannot be constructed.
+  A loop that stops producing new evidence is stopped before the budget is. This is OWASP LLM06
+  Unbounded Consumption, which moved up four places in the 2026 list, and the failure it prevents
+  arrives as an invoice rather than as an error.
 
 What it can still do, and what to watch for:
 
@@ -52,8 +75,26 @@ What it can still do, and what to watch for:
   adversarial verifier check that a claim matches its evidence; neither can check that the
   evidence itself is honest. **Read the sources on a report before acting on it**, particularly
   where the evidence is free text rather than a metric.
-- **It can be steered into which questions it asks.** Read-only and same-tenant, so the cost is
-  wasted steps rather than disclosure.
+- **It can be steered into which questions it asks.** Read-only, same-tenant, and bounded, so
+  the cost is wasted steps. The residual case worth naming: someone with write access to one
+  Slack channel but not to your analytics could steer a query and read the answer where it is
+  posted. That requires them to be inside the workspace already, and the answer lands in a
+  channel a human is reading.
+
+### What is deliberately not done
+
+**Plan-then-execute** — fixing the whole tool sequence before any untrusted data is read — would
+give control-flow integrity: injected text could change a tool's arguments but not which tools
+run. It is the strongest published structural answer
+([arXiv:2506.08837](https://arxiv.org/abs/2506.08837)), and CaMeL measures the cost at roughly
+seven points of task success for a provable guarantee
+([arXiv:2503.18813](https://arxiv.org/abs/2503.18813)).
+
+It is not implemented here, and the reason is that this agent's value *is* the result-dependent
+branching that pattern removes — following the evidence where it leads is the difference between
+an investigation and a dashboard. Given that every consequential action is already closed by the
+bounds above, the trade was judged not worth making. If watcher ever grows a write capability or
+an unconstrained egress, that judgement inverts and this is the paragraph to revisit.
 
 If your Slack or issue tracker is open to people you would not let read your analytics, that is
 the risk to weigh.
