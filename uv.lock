@@ -245,82 +245,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cortex-gtm-analyst"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "alembic" },
-    { name = "anthropic" },
-    { name = "asyncpg" },
-    { name = "celery" },
-    { name = "cryptography" },
-    { name = "duckdb" },
-    { name = "falkordb" },
-    { name = "fastapi" },
-    { name = "google-auth" },
-    { name = "httpx" },
-    { name = "jsonschema" },
-    { name = "matplotlib" },
-    { name = "openai" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "pyyaml" },
-    { name = "qdrant-client" },
-    { name = "redis" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
-    { name = "sqlglot" },
-    { name = "structlog" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "websockets" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "annotated-types" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.14" },
-    { name = "annotated-types", marker = "extra == 'dev'", specifier = ">=0.7" },
-    { name = "anthropic", specifier = ">=0.69,<1.0" },
-    { name = "asyncpg", specifier = ">=0.30" },
-    { name = "celery", specifier = ">=5.4" },
-    { name = "cryptography", specifier = ">=43.0" },
-    { name = "duckdb", specifier = ">=1.5.5" },
-    { name = "falkordb", specifier = ">=1.0.9" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "google-auth", specifier = ">=2.35" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "jsonschema", specifier = ">=4.23" },
-    { name = "matplotlib", specifier = ">=3.11.1" },
-    { name = "openai", specifier = ">=2.9,<4" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'dev'", specifier = ">=3.2" },
-    { name = "pydantic", specifier = ">=2.9" },
-    { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "qdrant-client", specifier = ">=1.12" },
-    { name = "redis", specifier = ">=5.2,<8.1" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.4" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
-    { name = "sqlglot", specifier = ">=27" },
-    { name = "structlog", specifier = ">=24.4" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "websockets", specifier = ">=13" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "coverage"
 version = "7.15.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1445,6 +1369,82 @@ sdist = { url = "https://files.pythonhosted.org/packages/bd/e4/d07b5f29d283596b9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/03/ff/7c0c86c43b3cbb927e0ccc0255cb4057ceba4799cd44ae95174ce8e8b5b2/vine-5.1.0-py3-none-any.whl", hash = "sha256:40fdf3c48b2cfe1c38a49e9ae2da6fda88e4794c810050a728bd7413811fb1dc", size = 9636, upload-time = "2023-11-05T08:46:51.205Z" },
 ]
+
+[[package]]
+name = "watcher-gtm"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "alembic" },
+    { name = "anthropic" },
+    { name = "asyncpg" },
+    { name = "celery" },
+    { name = "cryptography" },
+    { name = "duckdb" },
+    { name = "falkordb" },
+    { name = "fastapi" },
+    { name = "google-auth" },
+    { name = "httpx" },
+    { name = "jsonschema" },
+    { name = "matplotlib" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "pyyaml" },
+    { name = "qdrant-client" },
+    { name = "redis" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "sqlglot" },
+    { name = "structlog" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "annotated-types" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.14" },
+    { name = "annotated-types", marker = "extra == 'dev'", specifier = ">=0.7" },
+    { name = "anthropic", specifier = ">=0.69,<1.0" },
+    { name = "asyncpg", specifier = ">=0.30" },
+    { name = "celery", specifier = ">=5.4" },
+    { name = "cryptography", specifier = ">=43.0" },
+    { name = "duckdb", specifier = ">=1.5.5" },
+    { name = "falkordb", specifier = ">=1.0.9" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "google-auth", specifier = ">=2.35" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "jsonschema", specifier = ">=4.23" },
+    { name = "matplotlib", specifier = ">=3.11.1" },
+    { name = "openai", specifier = ">=2.9,<4" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'dev'", specifier = ">=3.2" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "qdrant-client", specifier = ">=1.12" },
+    { name = "redis", specifier = ">=5.2,<8.1" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.4" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
+    { name = "sqlglot", specifier = ">=27" },
+    { name = "structlog", specifier = ">=24.4" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "watchfiles"
