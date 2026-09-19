@@ -1,18 +1,41 @@
-# Cortex — AI GTM Workforce
+# watcher
 
-An AI workforce where every specialist has a defined role, tools, memory, KPIs and
-deliverables. V1 ships one employee: the **GTM Data Analyst**.
+**Ask why your numbers moved. Get an investigation, not a dashboard.**
 
-It does not return numbers. It investigates, cites, and recommends:
+```
+$ watcher ask "why did signups fall last week?"
+```
 
 > Signups dropped 18%. The largest contributor was mobile traffic, whose conversion
 > fell from 4.2% to 2.9%. This began after deploy `91c3e`. Recommendation: roll back
 > the onboarding modal.
 
-Every claim in that answer resolves to a stored piece of evidence from a real tool
-call, or it does not render.
+**Every claim there resolves to a stored piece of evidence from a real tool call, or it does not
+render.** Not a style guide — a structural rule. A claim carries `evidence_id`s; a gate resolves
+every one against the evidence store before the report is built; an adversarial verifier re-reads
+each claim against its own evidence with no sight of the report; and anything that survives
+neither is removed and disclosed rather than quietly kept.
+
+Across 40 repeated runs of a labelled suite, **delivered hallucinations: 0** — and `grounding`,
+`completeness` and both verifier precision measures returned an identical score on every attempt
+of every scenario. The numbers that move run-to-run, and by how much, are measured too and
+printed by `watcher eval --variance`.
+
+It reads what you already have — PostHog, GA4, HubSpot, GitHub, Slack, Mixpanel, BigQuery — and
+is only offered the connectors you have credentials for. One is enough to ask a question.
+
+Try it against a dataset whose true cause is known, before wiring up anything of your own:
+
+```
+$ watcher ask --dataset campaign_traffic_drop --show-truth
+```
 
 Apache-2.0. Runs locally under Docker Compose, and on GCP.
+
+**Status: public beta (0.1.0).** The grounding guarantee above is measured and holds. What is
+still moving is breadth and route stability — the same question can take a different path each
+run, and while six of eight labelled scenarios reach the same answer every time, two do not.
+Read a report's *risks* and *data quality* sections, not only its answer.
 
 ## What you need
 
@@ -52,8 +75,10 @@ alerting, OAuth in place of BYO credentials, and any specialist beyond the analy
 
 ## Services
 
-Cortex is a set of independently deployable services in one repo. They share the
-`cortex` library and communicate only through the message contracts in
+watcher is a set of independently deployable services in one repo. They share the
+`cortex` library — the import name, which differs from the command and the distribution; see
+[the note on names](#install-it-as-a-package) — and communicate only through the message
+contracts in
 [cortex/contracts/messages.py](cortex/contracts/messages.py) — never by importing
 one another. That boundary is enforced by
 [tests/unit/test_service_boundaries.py](tests/unit/test_service_boundaries.py); a
@@ -153,7 +178,7 @@ uvicorn --factory services.gateway.app:create_app --port 8000
 
 ### Local ports
 
-Cortex avoids the defaults because a developer machine usually already has
+watcher avoids the defaults because a developer machine usually already has
 Postgres on 5432 and Redis on 6379. FalkorDB speaks the Redis protocol, so a
 shadowed port surfaces as a baffling `unknown command 'GRAPH.QUERY'` rather than
 a connection error.
