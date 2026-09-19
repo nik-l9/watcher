@@ -97,7 +97,7 @@ _ENV_BY_PROVIDER_LABEL: dict[tuple[CredentialProvider, str], tuple[str, str]] = 
 
 
 def _parse(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="cortex.connect", description=__doc__)
+    parser = argparse.ArgumentParser(prog="watcher connect", description=__doc__)
     parser.add_argument("--tenant", required=True, help="Tenant slug. Created if absent.")
     parser.add_argument(
         "--provider",

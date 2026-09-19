@@ -63,7 +63,7 @@ from cortex.tools.executor import ToolExecutor
 
 def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="cortex.ask",
+        prog="watcher ask",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
