@@ -45,7 +45,7 @@ dependencies = [
     # "Expected an instance of `httpx2.AsyncClient`". A clean install resolved 1.0.0 and 45
     # tests failed on a tree whose development venv, holding 0.120.2, passed everything.
     # Lifting the bound is a migration, not a version bump.
-    "anthropic>=0.69,<1.0",
+    "anthropic>=0.69,<2.0",
     "pyyaml>=6.0",
     "duckdb>=1.5.5",
     "pyjwt[crypto]>=2.10",
