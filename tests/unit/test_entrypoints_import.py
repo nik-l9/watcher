@@ -21,6 +21,9 @@ import pytest
 
 #: Every module a human or a cron job invokes with `python -m`.
 ENTRYPOINTS = [
+    # The dispatcher `watcher` resolves to, and the one a broken import would take every other
+    # command down with.
+    "cortex.cli",
     "cortex.ask",
     "cortex.connect",
     "cortex.spend",

@@ -29,7 +29,7 @@ from cortex.tenancy.context import TenantContext
 
 
 def _parse(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="cortex.ingest", description=__doc__)
+    parser = argparse.ArgumentParser(prog="watcher ingest", description=__doc__)
     parser.add_argument("--tenant", help="Tenant slug. Omit with --targets.")
     parser.add_argument(
         "--provider",

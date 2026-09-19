@@ -25,7 +25,7 @@ from cortex.runtime.resources import open_resources
 
 
 def _parse(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="cortex.spend", description=__doc__)
+    parser = argparse.ArgumentParser(prog="watcher spend", description=__doc__)
     parser.add_argument(
         "--tenant",
         help="One tenant's slug. Omit for every active tenant, most expensive first.",

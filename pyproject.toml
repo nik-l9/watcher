@@ -2,7 +2,7 @@
 # The distribution name, which is not the import name: `import cortex` stays. Set for
 # publishing because `cortex` alone is not available on PyPI. Confirm before a first upload --
 # after one, the name is effectively permanent.
-name = "cortex-gtm-analyst"
+name = "watcher-gtm"
 version = "0.1.0"
 description = "An AI GTM data analyst that investigates rather than reporting numbers."
 readme = "README.md"
@@ -98,15 +98,18 @@ Repository = "https://github.com/nik-l9/watcher"
 Issues = "https://github.com/nik-l9/watcher/issues"
 
 [project.scripts]
-# The entry points an installed copy needs. `cortex-migrate` comes first in practice: the other
-# four need a schema, and an install with no repository checked out has no `alembic.ini` to run
-# against -- so the migrations ship inside the package and that command points alembic at them.
-cortex-migrate = "cortex.db.migrate:main"
-cortex-ask = "cortex.ask:main"
-cortex-spend = "cortex.spend:main"
-cortex-ingest = "cortex.ingest.__main__:main"
-cortex-connect = "cortex.connect:main"
-cortex-eval = "cortex.eval.__main__:main"
+# One command with subcommands rather than six binaries. `watcher ask "why did signups fall?"`
+# is a thing a founder can guess at; `watcher-ask` is a thing they have to be told -- and six
+# sibling binaries make `watcher --help` impossible, so there is no way to find the other five
+# once you know one. `watcher migrate` comes first in practice: the rest need a schema, and an
+# install with no repository checked out has no `alembic.ini` to run against, so the migrations
+# ship inside the package and that subcommand points alembic at them.
+#
+# The distribution is `watcher-gtm` rather than `watcher` because PyPI's `watcher` is an active
+# file-watching utility (0.4.1, released 2026-03-06), and the import name stays `cortex` for
+# now: renaming it touches 208 files and the `cortex_c_` prefix already persisted in live Qdrant
+# collections, which is its own change rather than a side effect of a naming decision.
+watcher = "cortex.cli:main"
 
 [tool.hatch.build.targets.wheel]
 # `services` is packaged so an installed copy can serve the API and run the workers, not only

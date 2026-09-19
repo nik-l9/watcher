@@ -66,7 +66,7 @@ def alembic_config() -> Config:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="cortex-migrate", description="Apply the Cortex database schema."
+        prog="watcher migrate", description="Apply the Cortex database schema."
     )
     parser.add_argument(
         "revision",

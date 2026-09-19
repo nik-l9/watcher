@@ -105,15 +105,23 @@ project was tested against rather than whatever resolves today.
 
 ### Install it as a package
 
-The path to take if you want to use the analyst rather than work on it. The import name is
-`cortex`; the distribution is `cortex-gtm-analyst`.
+The path to take if you want to use the analyst rather than work on it.
 
 ```bash
-pip install cortex-gtm-analyst
+pip install watcher-gtm
 
-cp .env.example .env        # then fill in your keys — see "What you need" above
-cortex-migrate              # create the schema (migrations ship inside the package)
-cortex-ask --real --tenant acme "Why did signups fall last week?"
+cp .env.example .env    # then fill in your keys — see "What you need" above
+watcher migrate         # create the schema (migrations ship inside the package)
+watcher ask --dataset campaign_traffic_drop --show-truth
+```
+
+That last line needs no connector credentials and no real data: it investigates a labelled
+dataset whose true cause is known, and prints the planted cause afterwards so the answer can be
+checked rather than admired. Point it at your own data once you believe it.
+
+```bash
+watcher connect --tenant acme --provider posthog   # secret from the environment, never argv
+watcher ask --real --tenant acme "Why did signups fall last week?"
 ```
 
 You still supply the datastores. The compose file in this repository is the quickest way, and
@@ -121,12 +129,19 @@ You still supply the datastores. The compose file in this repository is the quic
 
 | Command | What it does |
 |---|---|
-| `cortex-migrate` | Apply the schema. Run this first; the rest need it |
-| `cortex-ask` | Ask a question and print the report |
-| `cortex-connect` | Store a tenant's connector credentials in the vault |
-| `cortex-ingest` | Sync a connector now, rather than waiting for the nightly run |
-| `cortex-spend` | What each tenant is costing |
-| `cortex-eval` | Score the analyst against labelled fixtures |
+| `watcher migrate` | Apply the schema. Run this first; the rest need it |
+| `watcher ask` | Ask a question and print the report |
+| `watcher connect` | Store a tenant's connector credentials in the vault |
+| `watcher ingest` | Sync a connector now, rather than waiting for the nightly run |
+| `watcher spend` | What each tenant is costing |
+| `watcher eval` | Score the analyst against labelled fixtures |
+
+`watcher --help` lists them; `watcher <command> --help` gives one command's own options.
+
+**On the names.** The distribution is `watcher-gtm` because PyPI's `watcher` is an active
+file-watching utility. The import name is still `cortex` — as `beautifulsoup4` gives you `bs4` —
+because renaming it touches 208 files and the collection prefix already written into live vector
+stores, which deserves its own change rather than riding along with a naming decision.
 
 The API and the Slack transport are packaged too. The gateway is an app *factory* rather than a
 module-level instance, so that tests can build isolated apps — which means uvicorn needs
