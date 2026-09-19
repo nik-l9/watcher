@@ -93,9 +93,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.urls]
-Homepage = "https://github.com/nik-l9/cortex"
-Repository = "https://github.com/nik-l9/cortex"
-Issues = "https://github.com/nik-l9/cortex/issues"
+Homepage = "https://github.com/nik-l9/watcher"
+Repository = "https://github.com/nik-l9/watcher"
+Issues = "https://github.com/nik-l9/watcher/issues"
 
 [project.scripts]
 # The entry points an installed copy needs. `cortex-migrate` comes first in practice: the other
