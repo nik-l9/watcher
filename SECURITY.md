@@ -1,58 +1,87 @@
-# Security policy
+# Security
 
 ## Reporting a vulnerability
 
-Email **nklkumar0321@gmail.com**. Please do not open a public issue for anything that could be
-exploited before a fix exists.
+Open a [private security advisory](https://github.com/nik-l9/watcher/security/advisories/new).
+Please do not open a public issue for anything exploitable.
 
-Useful in a report, in rough order of value: what an attacker gets, the smallest reproduction you
-have, the commit or version you tested, and whether it needs valid credentials for a tenant. A
-one-paragraph description of a real problem is worth more than a polished report of a theoretical
-one — send what you have.
+I will acknowledge within 72 hours and tell you honestly whether I can fix it quickly, slowly,
+or not at all.
 
-Expect an acknowledgement within a few days. This is a small project without a paid security team,
-so there is no bounty and no guaranteed remediation window. What is guaranteed is that a real
-report gets a straight answer about whether it is being fixed.
+## The threat model, stated plainly
 
-## What this project treats as a vulnerability
+You run this yourself, with your own API keys, against your own data. So the thing you are
+trusting is the code in this repository, and you deserve to know what it does with those keys
+and where it can be pushed around. This section is what I would want to read before running
+someone else's agent against my company's Slack.
 
-The two guarantees worth attacking, because everything else is a bug:
+### What the keys do, and where they go
 
-**1. Tenant isolation.** Data belonging to one tenant must be unreachable from another. Isolation
-is structural rather than filtered — one FalkorDB graph per tenant, one Qdrant collection per
-tenant, a per-tenant vault key, a tenant predicate on every Postgres query — so a way to read
-across tenants is the most serious class of report this project can receive. `tests/tenancy/`
-exists to prove it, and a case that suite does not cover is itself worth reporting.
+- **Your LLM key** is read from the environment and used for exactly one thing: calls to the
+  model provider's API. It is never written to disk, never logged, and never sent anywhere else.
+- **Connector credentials** are envelope-encrypted with `CORTEX_VAULT_MASTER_KEY` and stored as
+  ciphertext in Postgres. They are decrypted per call, after checking the tool being invoked
+  belongs to the tenant asking. `watcher connect` reads secrets from the **environment, never
+  from a command-line argument** — an argument lands in shell history and in the process table,
+  where any other user on the machine can read it.
+- **Nothing phones home.** There is no telemetry, no usage reporting, no update check. The only
+  outbound connections are to your model provider and to the connectors you configured.
 
-**2. Grounding.** No claim reaches a reader without a resolvable evidence id. A way to get an
-unevidenced claim past the citation gate or the adversarial verifier is a vulnerability in the
-product's central promise, not a quality issue. Fabricating a citation that resolves is the
-strongest version of this.
+### The main risk: prompt injection through your own data
 
-Also in scope: credential disclosure (the vault, connector tokens, anything reaching a log or a
-model's context), authentication and tenant-binding on the gateway, and any path that lets a
-read-only deployment write.
+This is an agent that reads Slack messages, GitHub issue bodies, pull-request review comments,
+event names and CRM fields, and feeds them to a model. **Anyone who can write into those systems
+can write into the model's context.** A colleague, a contractor, an external user filing an issue
+on a public repository — all of them can author text the agent will read.
 
-## What is out of scope
+What that cannot do, structurally:
 
-- **The datastores' own configuration.** `docker-compose.yml` is a development stack: no
-  passwords worth the name, no TLS, ports bound to localhost. Hardening it for exposure is
-  deployment work, and reports that it is insecure as shipped will be closed as intended.
-- **Denial of service through your own API keys.** An investigation spends tokens by design. Cost
-  controls are budgets and step limits, not a security boundary.
-- **Prompt injection through connector data** — a Slack message or a PR title that argues with the
-  analyst. Real, and treated as a correctness problem rather than a vulnerability: the mitigation
-  is that a claim must cite an evidence row, so injected text cannot manufacture a citation. A
-  case where it *can* is in scope, and interesting.
-- Anything requiring the attacker to already hold that tenant's credentials.
+- **It cannot make the agent change anything.** Every capability is read-only, and that is
+  enforced at construction rather than by convention: a capability declaring `read_only=False`
+  raises at import, so a write path cannot exist to be reached. See `cortex/tools/base.py`.
+- **It cannot reach another tenant.** Graph-per-tenant, per-tenant vector collections, and a
+  tenant predicate on every query, with the isolation suite in `tests/tenancy/` gating any
+  release.
+- **It cannot exfiltrate to an attacker-chosen destination.** Connectors call fixed API hosts;
+  no URL from model output or tool output is fetched.
 
-## Handling your own deployment
+What it can still do, and what to watch for:
 
-Two notes that have bitten in practice, since a public repository invites people to run this:
+- **It can influence a report.** An attacker's Slack message becomes an *observation*, so a claim
+  citing it is technically grounded — in the attacker's sentence. The grounding gate and the
+  adversarial verifier check that a claim matches its evidence; neither can check that the
+  evidence itself is honest. **Read the sources on a report before acting on it**, particularly
+  where the evidence is free text rather than a metric.
+- **It can be steered into which questions it asks.** Read-only and same-tenant, so the cost is
+  wasted steps rather than disclosure.
 
-- **Every `.env` variant is gitignored, including `.env.bak.<timestamp>`.** A backup written by a
-  tool once sat untracked with live credentials in it, matched by neither `.env` nor `.env.local`.
-  Check what your editor and your tooling leave behind.
-- **`docker compose` bakes environment values at container *create* time.** A rotated key needs
-  `up -d` to recreate the containers, not `restart` — a `restart` leaves half the services on the
-  old value with nothing to indicate it.
+If your Slack or issue tracker is open to people you would not let read your analytics, that is
+the risk to weigh.
+
+### Multi-tenancy
+
+Present and structural, but the isolation boundary has only been exercised by this repository's
+own test suite. It has not been through third-party review or a pentest. **Do not treat it as a
+security boundary between mutually hostile tenants** without doing that work yourself.
+
+## What is checked in CI
+
+- **The whole git history is scanned for secrets** on every push, not just the working tree — a
+  key that was committed and later deleted is still in the pack and still exploitable.
+- The tenancy isolation suite runs against real datastores rather than mocks. A mocked graph
+  would happily prove a guarantee the real engine does not provide.
+- GitHub Actions are pinned to full commit SHAs. Tags are mutable, and in March 2025
+  `tj-actions/changed-files` was compromised by repointing existing tags at a malicious commit.
+- Workflows declare `permissions: contents: read`, so a compromised step cannot use
+  `GITHUB_TOKEN` to write to the repository.
+
+## Running it safely
+
+- Give each connector credential **the narrowest scope that works**. The analyst only ever reads;
+  a token with write scope grants nothing it uses and everything an attacker would want.
+- Keep `CORTEX_VAULT_MASTER_KEY` out of the repository and out of your shell history. `make
+  setup` generates one into `.env`, which is gitignored.
+- The compose file is for **local development**. It binds datastores to localhost with
+  development passwords; it is not a production deployment.
+- If a secret has ever been typed into a terminal you share, a chat, or a screenshot, treat it as
+  compromised and rotate it. Removing it from a file does not remove it from history.

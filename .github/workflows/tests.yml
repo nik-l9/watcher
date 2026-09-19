@@ -17,6 +17,13 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege, set at the top so every job inherits it and a new job cannot silently get
+# more. The default for a workflow with no `permissions:` block is broad -- on a public
+# repository a compromised step could use `GITHUB_TOKEN` to push, open releases, or comment as
+# the repository. Nothing here needs to write anything.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -65,7 +72,24 @@ jobs:
           - 6333:6333
 
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a full commit SHA, not a tag. A tag is mutable: in March 2025 the
+      # `tj-actions/changed-files` action was compromised by repointing its existing tags at a
+      # malicious commit, and every workflow tracking `@v35` executed it on the next run. A SHA
+      # cannot be repointed. The comment records which version the SHA is, because a bare SHA is
+      # unreadable and that is how pinning gets reverted by someone tidying up.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # Full history, because a secret introduced and later deleted is still in the pack and
+      # still exploitable. Scanning only the working tree finds the one case that does not
+      # matter.
+      - name: Scan the whole history for secrets
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.29.0/gitleaks_8.29.0_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks git --no-banner --redact --exit-code 1 .
 
       - name: Install uv
         run: |
