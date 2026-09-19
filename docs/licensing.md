@@ -15,15 +15,41 @@ offering *that software* as a hosted service to third parties, and nothing else.
 restrict internal use, and it does not reach a whole service the way SSPL section 13 does. The two
 are different problems and conflating them makes the smaller one look unfixable.
 
-## Cortex's own code: Apache-2.0
+## watcher's own code: AGPL-3.0, dual-licensed
 
-`LICENSE` is the Apache License 2.0. Chosen over MIT for the **express patent grant** in §3: a
-company standing behind a project wants contributors granting patent rights explicitly, and
-wants the retaliation clause. MIT is silent on patents, which is fine for a weekend library and
-thin for something a business depends on.
+`LICENSE` is the GNU Affero General Public License v3.
 
-Swapping it is a one-file change while nothing is published. After a public push it is
-effectively permanent, because every fork keeps the terms it received.
+**Changed from Apache-2.0 on 2026-09-19, while the repository was still private** — which is the
+window this file's earlier version flagged: "swapping it is a one-file change while nothing is
+published; after a public push it is effectively permanent, because every fork keeps the terms
+it received." The decision was taken deliberately inside that window rather than inherited.
+
+The reasoning. Apache-2.0 was chosen for its express patent grant in §3, and AGPL-3.0 carries an
+equivalent patent grant in §11, so nothing is lost there. What Apache-2.0 also permitted was a
+competitor or a cloud vendor taking this, hosting it, charging for it, and owing nothing — and
+the differentiated work here is exactly the part worth hosting: the grounding stack, the
+evaluation harness, the tool framework.
+
+AGPL's §13 closes that and nothing else. It reaches someone who **offers the program to third
+parties over a network**; it does not reach a user who forks it, modifies it, and runs it for
+themselves or their company, which is the intended user in every case. So the "fork it, add your
+own API keys, run it locally" story is untouched.
+
+**Dual-licensed**, which is what makes it a commercial basis rather than only a restriction: a
+commercial licence is sold to anyone who wants to host watcher as a service without the AGPL's
+reciprocity, or whose legal department refuses AGPL outright. This is the GitLab / Grafana /
+pre-SSPL MongoDB shape, and it works only while the copyright stays with one holder — see the
+CLA note below.
+
+**Contributor licensing.** Dual-licensing requires the right to relicense contributions. Today
+the copyright is single-holder and that right exists. A contributor licence agreement should be
+in place *before* the first outside contribution is merged, not after: retroactive relicensing
+needs every contributor's individual consent, and that is how dual-licensed projects get stuck
+unable to sell the licence they planned on.
+
+**The one cost, stated plainly.** Some companies ban AGPL by policy, so a fraction of potential
+users self-select out before evaluating. That was accepted knowingly: those are, by and large,
+the companies most likely to have wanted the hosted product anyway.
 
 ## Python dependencies: all permissive
 
@@ -47,7 +73,7 @@ non-OSI terms. FalkorDB is SSPLv1 and is itself built on Redis.
 
 The distinction that decides it: **Cortex does not distribute either database.** It talks to
 them over a network protocol, and `docker-compose.yml` names public images that a user pulls
-themselves. Cortex's own source can be Apache-2.0 regardless of what those images are licensed
+themselves. watcher's own source can be AGPL-3.0 regardless of what those images are licensed
 under — a license binds the thing it covers.
 
 And for the intended user — fork it, add their own API keys, run it locally — SSPL imposes
