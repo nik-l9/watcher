@@ -8,12 +8,13 @@ honest about emptiness.
 
 from __future__ import annotations
 
+import socket
 from typing import Any
 
 import httpx
 import pytest
 
-from cortex.tools.base import ToolContext, UpstreamError
+from cortex.tools.base import InvalidParams, ToolContext, UpstreamError
 from cortex.tools.mcp import (
     MAX_TOOLS,
     RESULT_KEY,
@@ -21,10 +22,34 @@ from cortex.tools.mcp import (
     MCPTool,
     MCPToolRefused,
     admissible,
+    check_server_url,
     discover,
 )
 
 SERVER = MCPServer(name="acme_mcp", url="https://mcp.example/rpc")
+
+
+@pytest.fixture(autouse=True)
+def _resolve_the_documentation_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let `mcp.example` resolve to a public address, for every test in this module.
+
+    `MCPTool._client` resolves the server host and refuses private or link-local answers, which
+    is the SSRF guard. The documentation host these tests use does not resolve at all, so
+    without this every test here would fail on DNS rather than on what it is testing — and
+    making them depend on real DNS instead would be slower, offline-hostile, and would pass for
+    the wrong reason the day someone registers the name.
+
+    Only that one host. Everything else falls through to the real resolver, so the tests below
+    that assert a private address is refused still exercise the real path.
+    """
+    real = socket.getaddrinfo
+
+    def _fake(host: str, port: object, *args: object, **kwargs: object) -> list[tuple]:
+        if host == "mcp.example":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        return real(host, port, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("cortex.tools.mcp.socket.getaddrinfo", _fake)
 
 
 def _tool(name: str = "search_tickets", **overrides: Any) -> dict[str, Any]:
@@ -295,3 +320,110 @@ def _stub(
         )
 
     monkeypatch.setattr(tool, "_client", _factory)
+
+
+class TestATenantSuppliedUrlCannotReachInside:
+    """`MCPServer.url` is the one value in this codebase where somebody else chooses what the
+    server connects to, and it reached `httpx` with no validation at all.
+
+    That is a server-side request forgery sink. A tenant names
+    `https://169.254.169.254/latest/meta-data/iam/security-credentials/`, the gateway fetches it
+    from inside the trust boundary with whatever network position it has, and hands the result
+    back as an observation the analyst will happily cite. Cloud instance credentials, reached
+    through a feature whose purpose is to let tenants add their own tools.
+
+    Checked at construction rather than at call time, for the reason `Capability` rejects a write
+    capability there: a value that cannot be built cannot be reached.
+    """
+
+    PUBLIC = "https://mcp.test.invalid/api"
+
+    @pytest.mark.parametrize(
+        ("url", "why"),
+        [
+            ("http://mcp.example.com", "plain http would send the bearer token in clear"),
+            ("file:///etc/passwd", "file:// is the classic SSRF escalation scheme"),
+            ("gopher://mcp.example.com", "gopher:// can forge arbitrary TCP payloads"),
+            ("https://user:secret@mcp.example.com", "credentials in a url end up in logs"),
+            ("https://", "no host at all"),
+        ],
+    )
+    def test_the_shape_of_the_url_is_checked(self, url: str, why: str) -> None:
+        with pytest.raises(InvalidParams):
+            check_server_url(url)
+
+    @pytest.mark.parametrize(
+        ("url", "target"),
+        [
+            ("https://169.254.169.254/meta-data/", "every cloud metadata service"),
+            ("https://127.0.0.1:8080/mcp", "loopback"),
+            ("https://10.0.0.5/mcp", "RFC1918"),
+            ("https://192.168.1.1/mcp", "RFC1918"),
+            ("https://172.16.0.1/mcp", "RFC1918"),
+            ("https://100.64.0.1/mcp", "CGNAT"),
+            ("https://[::1]/mcp", "IPv6 loopback"),
+            ("https://[fe80::1]/mcp", "IPv6 link-local"),
+        ],
+    )
+    def test_an_address_inside_the_perimeter_is_refused(self, url: str, target: str) -> None:
+        with pytest.raises(InvalidParams, match="private or link-local"):
+            check_server_url(url)
+
+    def test_a_v4_mapped_v6_address_is_unwrapped_before_it_is_judged(self) -> None:
+        """`::ffff:169.254.169.254` is the metadata service wearing a v6 costume. Judged as the
+        v6 address it literally is, it matches no blocked v6 network and passes."""
+        with pytest.raises(InvalidParams, match="private or link-local"):
+            check_server_url("https://[::ffff:169.254.169.254]/meta-data/")
+
+    def test_a_host_that_does_not_resolve_is_refused_rather_than_attempted(self) -> None:
+        with pytest.raises(InvalidParams, match="does not resolve"):
+            check_server_url("https://no-such-host.invalid/mcp")
+
+    def test_syntax_is_rejected_at_construction(self) -> None:
+        """The free half runs where it is free. A url that cannot be built cannot be reached,
+        and scheme and credentials need no network to judge."""
+        with pytest.raises(InvalidParams, match="must use https"):
+            MCPServer(name="evil", url="http://mcp.example/rpc")
+
+    def test_the_address_is_judged_before_connecting_not_at_construction(self) -> None:
+        """DNS belongs next to the socket, not next to the constructor — resolving at
+        construction makes building a dataclass do network I/O, which is slow, flaky, and
+        untestable offline.
+
+        The guarantee that matters is unchanged: nothing reaches the network without the
+        address having been judged, because the check runs inside the client factory that every
+        request goes through.
+        """
+        server = MCPServer(name="evil", url="https://169.254.169.254/rpc")
+        tool = MCPTool(server=server, descriptors=[_tool()])
+        with pytest.raises(InvalidParams, match="private or link-local"):
+            tool._client(_ctx(object()))
+
+    def test_a_public_host_is_allowed(self, monkeypatch) -> None:
+        """The guard must not be a blanket refusal. Resolution is stubbed because a test that
+        depends on live DNS fails on an aeroplane and passes for the wrong reason in CI."""
+        import socket as socket_module
+
+        monkeypatch.setattr(
+            "cortex.tools.mcp.socket.getaddrinfo",
+            lambda *a, **k: [
+                (socket_module.AF_INET, socket_module.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+            ],
+        )
+        assert check_server_url(self.PUBLIC) == self.PUBLIC
+        assert MCPServer(name="ok", url=self.PUBLIC).url == self.PUBLIC
+
+    def test_every_resolved_address_is_checked_not_just_the_first(self, monkeypatch) -> None:
+        """A name resolving to one public and one private address would otherwise pass the check
+        and then connect to either, which is the whole game."""
+        import socket as socket_module
+
+        monkeypatch.setattr(
+            "cortex.tools.mcp.socket.getaddrinfo",
+            lambda *a, **k: [
+                (socket_module.AF_INET, socket_module.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+                (socket_module.AF_INET, socket_module.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+            ],
+        )
+        with pytest.raises(InvalidParams, match="private or link-local"):
+            check_server_url(self.PUBLIC)

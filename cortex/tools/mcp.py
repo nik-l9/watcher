@@ -46,9 +46,12 @@ smuggled in behind a connector.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -84,6 +87,99 @@ RESULT_KEY = "result"
 MAX_TOOLS = 24
 
 
+#: Networks an MCP server may never live on, because a URL a *tenant* supplies is a URL an
+#: attacker may supply. Without this, `MCPServer.url` is a server-side request forgery sink: a
+#: tenant names `http://169.254.169.254/latest/meta-data/iam/security-credentials/` and the
+#: gateway fetches cloud instance credentials on their behalf, from inside the trust boundary,
+#: with the result handed back as an observation.
+#:
+#: Blocked by *resolved address*, not by hostname. A hostname check is bypassed by anything that
+#: resolves inward -- `localtest.me`, a DNS record the attacker controls pointing at 127.0.0.1,
+#: or an IPv6-mapped form of a v4 address. The address families below cover loopback, RFC1918,
+#: link-local (which is where every cloud metadata service lives), CGNAT, and the v6 equivalents.
+_FORBIDDEN_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",  # loopback
+        "10.0.0.0/8",  # RFC1918
+        "172.16.0.0/12",  # RFC1918
+        "192.168.0.0/16",  # RFC1918
+        "169.254.0.0/16",  # link-local, and every cloud metadata endpoint
+        "100.64.0.0/10",  # CGNAT
+        "0.0.0.0/8",  # "this network"
+        "::1/128",  # v6 loopback
+        "fc00::/7",  # v6 unique-local
+        "fe80::/10",  # v6 link-local
+    )
+)
+
+
+def check_server_syntax(url: str) -> str:
+    """The half of the URL check that costs nothing: scheme, credentials, a host at all.
+
+    Split from the address check deliberately. This runs at construction, where it is free and
+    catches the careless cases immediately; resolving DNS at construction would make building a
+    dataclass do network I/O -- slow, flaky, and impossible to test without a network.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise InvalidParams(
+            f"mcp: server url must use https, not {parsed.scheme or 'a missing scheme'!r}. "
+            "A bearer token sent over http is readable in transit."
+        )
+    if parsed.username or parsed.password:
+        raise InvalidParams("mcp: server url must not embed credentials; they end up in logs")
+    if not parsed.hostname:
+        raise InvalidParams(f"mcp: server url {url!r} has no host")
+    return url
+
+
+def check_server_url(url: str) -> str:
+    """Return `url` if an MCP server may be reached at it, or raise saying why not.
+
+    **`MCPServer.url` is tenant-supplied and reaches `httpx` directly**, which makes it the one
+    place in this codebase where somebody else chooses what the server connects to. OWASP's SSRF
+    guidance is to allowlist where the callable hosts are known and to validate the resolved
+    address otherwise; an MCP server can legitimately live anywhere, so this is the second form.
+
+    Three checks, and each blocks a different bypass:
+
+      - **Scheme must be https.** `file://`, `gopher://` and `dict://` are the classic SSRF
+        escalation schemes, and plain `http` would send the tenant's bearer token in clear.
+      - **The host must resolve, and every address it resolves to must be public.** Checking the
+        *resolved* address rather than the hostname is what stops `localtest.me`, an attacker's
+        own DNS record pointing at 127.0.0.1, and `[::ffff:169.254.169.254]`. Every answer is
+        checked, not the first: a name that resolves to one public and one private address would
+        otherwise pass and then connect to either.
+      - **No credentials in the URL.** `https://user:pass@host` puts a secret somewhere it will
+        be logged.
+
+    **What this does not close, stated rather than implied.** Between this check and the
+    connection, DNS can change its answer -- the rebinding attack. Closing that needs the
+    connection pinned to the address that was validated, which `httpx` does not expose a hook
+    for; the residual risk is recorded in SECURITY.md rather than left for a reader to discover.
+    """
+    parsed = urlparse(check_server_syntax(url))
+    host = parsed.hostname or ""
+    try:
+        resolved = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise InvalidParams(f"mcp: server host {host!r} does not resolve ({exc})") from exc
+    for entry in resolved:
+        address = ipaddress.ip_address(entry[4][0])
+        # v4-mapped v6 addresses are unwrapped first, so `::ffff:127.0.0.1` is caught as
+        # loopback rather than passing as an unremarkable v6 address.
+        if getattr(address, "ipv4_mapped", None) is not None:
+            address = address.ipv4_mapped
+        for network in _FORBIDDEN_NETWORKS:
+            if address.version == network.version and address in network:
+                raise InvalidParams(
+                    f"mcp: server host {host!r} resolves to {address}, which is on a private or "
+                    "link-local network. An MCP server must be reachable at a public address."
+                )
+    return url
+
+
 @dataclass(frozen=True, slots=True)
 class MCPServer:
     """One MCP server a tenant has connected."""
@@ -93,6 +189,12 @@ class MCPServer:
     url: str
     #: Optional allowlist of tool names. Empty means "every tool that passes the guards".
     allow: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        # Syntax at construction, address before connecting. A value that cannot be built
+        # cannot be reached -- the reason `Capability` rejects a write capability here -- but
+        # DNS belongs next to the socket, not next to the constructor.
+        check_server_syntax(self.url)
 
 
 class MCPToolRefused(InvalidParams):
@@ -254,6 +356,9 @@ class MCPTool(BaseTool):
         return body
 
     def _client(self, ctx: ToolContext) -> httpx.AsyncClient:
+        # Resolved and judged immediately before connecting, which is the only point where the
+        # answer is current. See `check_server_url` for what this closes and what it does not.
+        check_server_url(self.server.url)
         headers = {
             "Content-Type": "application/json",
             # Both are required by the Streamable HTTP transport: a server may answer a single
@@ -263,7 +368,15 @@ class MCPTool(BaseTool):
         }
         if ctx.credential:
             headers["Authorization"] = f"Bearer {ctx.credential}"
-        return httpx.AsyncClient(base_url=self.server.url, headers=headers, timeout=DEFAULT_TIMEOUT)
+        return httpx.AsyncClient(
+            base_url=self.server.url,
+            headers=headers,
+            timeout=DEFAULT_TIMEOUT,
+            # Explicit, not incidental. httpx defaults to not following redirects, and a
+            # redirect is how a validated public host hands the connection to a private
+            # one -- the standard bypass for exactly the check above.
+            follow_redirects=False,
+        )
 
 
 async def discover(
@@ -276,6 +389,10 @@ async def discover(
     result is what `MCPTool` is constructed from.
     """
     owned = client is None
+    if owned:
+        # Only when this function owns the client. A caller passing one in has taken
+        # responsibility for where it points -- which is how the tests drive a mock transport.
+        check_server_url(server.url)
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -284,7 +401,10 @@ async def discover(
     if credential:
         headers["Authorization"] = f"Bearer {credential}"
     http = client or httpx.AsyncClient(
-        base_url=server.url, headers=headers, timeout=DEFAULT_TIMEOUT
+        base_url=server.url,
+        headers=headers,
+        timeout=DEFAULT_TIMEOUT,
+        follow_redirects=False,
     )
     try:
         body = await request_json(

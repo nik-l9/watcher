@@ -15,7 +15,12 @@ setup:  ## Create the venv, install deps, write .env if absent
 	# project's own venv, where `uv pip install` honours an already-active VIRTUAL_ENV instead
 	# -- installing elsewhere and reporting success, with `make test` then failing on
 	# "No module named pytest".
-	uv sync --extra dev
+	# `--locked` rather than a bare sync: a bare `uv sync` silently *re-resolves* when the
+	# lockfile has drifted from pyproject.toml, so you stop installing the versions the lock
+	# names and stop testing what you ship. `--locked` fails instead, which is the useful
+	# behaviour -- and it is the difference that makes `uv.lock`'s hash verification worth
+	# anything, since a re-resolve picks new artifacts to verify against.
+	uv sync --extra dev --locked
 	@test -f .env || (cp .env.example .env && \
 		$(PY) -c "import base64,os,pathlib;p=pathlib.Path('.env');p.write_text(p.read_text().replace('CORTEX_VAULT_MASTER_KEY=','CORTEX_VAULT_MASTER_KEY='+base64.urlsafe_b64encode(os.urandom(32)).decode()))" && \
 		echo "wrote .env with a fresh vault master key")
