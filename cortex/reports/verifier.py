@@ -1197,16 +1197,36 @@ def _add_risks(
             )
         )
     if overstated:
-        risks.append(
-            Risk(
-                description=(
-                    f"{overstated} claim(s) go beyond their evidence -- overstated, or "
-                    "carrying a figure the evidence does not show -- and are retained with "
-                    "reduced confidence rather than removed, because the rest of each one "
-                    "holds."
-                )
-            )
-        )
+        # **Name what the evidence says, not just how many claims were flagged.**
+        #
+        # This risk used to carry a count alone. Across 72 captured reports, 17% of flagged
+        # claims had the correction already written in the verifier's own reason -- "values
+        # are 26-28, not 26-29 as claimed"; "the search used after=2026-05-15, not 1 May
+        # 2026"; "only two empty Slack searches, not a full check across annotations and
+        # flags" -- and 29 of those 32 were retained and delivered. The right answer was
+        # computed, persisted in `verifier_rejections`, and then replaced with a number.
+        #
+        # A reader given a count cannot act on it: they do not know which sentence to
+        # distrust or what the evidence actually showed. A reader given the reason can. This
+        # costs no model call, because the judgement already happened.
+        flagged = [v for v in verdicts if v.verdict is Verdict.OVERSTATED]
+        lines = [
+            f"{overstated} claim(s) go beyond their evidence and are retained with reduced "
+            "confidence rather than removed, because the rest of each one holds. What the "
+            "check found:"
+        ]
+        for verdict in flagged:
+            # Bounded per entry so one verbose reason cannot crowd out the others, and the
+            # whole risk stays inside the schema's 1,000-character limit.
+            reason = " ".join(verdict.reason.split())[:180]
+            lines.append(f"- {verdict.location}: {reason}")
+        joined = "\n".join(lines)
+        if len(joined) > 1000:
+            kept = len(lines) - 1
+            while len(joined) > 1000 and kept > 1:
+                kept -= 1
+                joined = "\n".join(lines[: kept + 1] + [f"- ... and {overstated - kept} more."])
+        risks.append(Risk(description=joined[:1000]))
     if unverified:
         risks.append(
             Risk(
