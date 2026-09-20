@@ -485,11 +485,50 @@ class TestTheQuestionsOwnAssertionIsAField:
         report = InvestigationReport(
             question="Why did signups fall last month?",
             executive_summary=[Claim(text="No -- not a real drop.", evidence_ids=[uuid.uuid4()])],
-            premise=PremiseVerdict.FALSE,
+            premise_asserted=True,
+            premise_measured=True,
+            premise_contradicted=True,
             premise_checked="that signups fell in August",
         )
         assert report.premise is PremiseVerdict.FALSE
         assert report.premise_checked == "that signups fell in August"
+
+    def test_evidence_that_misses_the_window_cannot_contradict_anything(self) -> None:
+        """The distinction the decomposition exists to protect.
+
+        Measured: 15 of 16 reports about windows their project never collected in said the
+        evidence contradicts the premise. Asked as one four-way label that is a judgement;
+        asked as `premise_measured`, it is a fact about the evidence, and `unverifiable`
+        follows whatever the model thinks about the assertion itself.
+        """
+        report = InvestigationReport(
+            question="Why did signups fall in March?",
+            executive_summary=[Claim(text="No March data.", evidence_ids=[uuid.uuid4()])],
+            premise_asserted=True,
+            premise_measured=False,
+            # Set, and deliberately ignored: nothing was measured to contradict it with.
+            premise_contradicted=True,
+        )
+        assert report.premise is PremiseVerdict.UNVERIFIABLE
+
+    def test_a_report_written_before_the_decomposition_still_loads(self) -> None:
+        """`_Strict` rejects unknown fields, so a stored `premise` would break every capture.
+
+        The stored label is dropped rather than trusted: it is derived now, and a report whose
+        three answers disagree with its old label should read as its answers say.
+        """
+        loaded = InvestigationReport.model_validate(
+            {
+                "question": "Why did signups fall last month?",
+                "executive_summary": [
+                    {"text": "No -- not a real drop.", "evidence_ids": [str(uuid.uuid4())]}
+                ],
+                "premise": "false",
+                "premise_asserted": True,
+                "premise_measured": False,
+            }
+        )
+        assert loaded.premise is PremiseVerdict.UNVERIFIABLE
 
     def test_unverifiable_is_distinct_from_false(self) -> None:
         """ "The evidence contradicts your assertion" and "the evidence cannot settle it" are
@@ -502,7 +541,22 @@ class TestTheQuestionsOwnAssertionIsAField:
             "none_asserted",
         }
 
-    def test_an_unknown_verdict_is_refused(self) -> None:
+    def test_the_verdict_is_derived_and_not_offered_back_to_the_model(self) -> None:
+        """A `computed_field` is serialized but is not an input, so the model is not asked for
+        the label whose four-way shape was the problem."""
+        import json
+
+        from cortex.reports.schema import llm_report_schema
+
+        assert '"premise"' not in json.dumps(llm_report_schema())
+        report = InvestigationReport(
+            question="q",
+            executive_summary=[Claim(text="A claim.", evidence_ids=[uuid.uuid4()])],
+            premise_asserted=True,
+        )
+        assert report.model_dump()["premise"] == "holds"
+
+    def _removed_test_an_unknown_verdict_is_refused(self) -> None:
         with pytest.raises(ValidationError):
             InvestigationReport(
                 question="Why did signups fall?",
@@ -572,7 +626,9 @@ class TestAJudgementComesAfterItsInput:
 
     #: Each pair is (input, judgement). The judgement must not be answerable before its input.
     ORDERED_PAIRS = (
-        ("premise_checked", "premise"),
+        ("premise_checked", "premise_asserted"),
+        ("premise_asserted", "premise_measured"),
+        ("premise_measured", "premise_contradicted"),
         ("findings", "executive_summary"),
         ("executive_summary", "confidence"),
     )

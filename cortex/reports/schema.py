@@ -22,7 +22,14 @@ import enum
 import uuid
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 
 class Confidence(enum.StrEnum):
@@ -461,15 +468,68 @@ class InvestigationReport(_Strict):
     #: on `premise` below, and a first attempt at putting it here broke the 7,000-byte grammar
     #: budget that `test_the_schema_stays_within_the_grammar_budget` guards.
     premise_checked: str = Field(default="", max_length=1000)
-    #: Whether the question's own assertion survived checking.
-    #: Terse on purpose. The full instruction lives in `cortex.reports.shape`, which reaches the
-    #: model as prose rather than as grammar -- a long description here is paid for twice, once
-    #: in the compiled grammar and once against the 7,000-byte tripwire that structured outputs
-    #: enforces from the other side. The first draft of this field cost 1,062 bytes and broke it.
-    premise: PremiseVerdict = Field(
-        default=PremiseVerdict.NONE_ASSERTED,
-        description="Verdict on what the question itself asserted.",
-    )
+    # **The premise verdict is asked as three yes/no questions, not as one four-way choice.**
+    #
+    # Measured: over twenty generated cases whose window the project has no data in at all,
+    # fifteen of sixteen reports answered `false` -- the evidence contradicts the premise --
+    # about periods nothing was collected in. `unverifiable` and `false` differ only in
+    # whether the evidence reaches the window, and asked as a single label that difference is
+    # something the model decides after it has already chosen. Asked in order, each answer is
+    # a fact about the evidence and the verdict follows from them.
+    #
+    # This is the Likert-to-binary decomposition CheckEval reports at +0.45 agreement, applied
+    # to the one field that was observed re-rolling. It is also the fourth application of this
+    # file's ordering rule: each question is answerable before the one that depends on it.
+    #
+    # No `description` on any of the three, for the reason `premise_checked` above gives: the
+    # instruction lives in `cortex.reports.shape`, which reaches the model as prose rather
+    # than as grammar, and a description here is paid for twice -- once in the compiled
+    # grammar and once against the 7,000-byte tripwire.
+    #
+    # Sized rather than estimated, twice. A first draft with full sentences cost 119 bytes
+    # against 82 of headroom. A second, prototyped by hand-building the property dicts,
+    # predicted 6,916 and shipped 7,102: pydantic adds a `title` to every field, which the
+    # hand-built version had not. Dropping `PremiseVerdict` from `$defs` pays for most of the
+    # three fields; dropping their descriptions pays for the rest.
+    premise_asserted: bool = False
+    premise_measured: bool = True
+    premise_contradicted: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def premise(self) -> PremiseVerdict:
+        """The verdict the three answers determine.
+
+        Derived rather than asked for, so everything that reads one field -- the scorer, the
+        investigator's early exit, the report view, every stored report -- is untouched by the
+        decomposition. What changed is only what the model is asked to emit, which is where
+        the confusion was.
+
+        A `computed_field` appears in the serialized report but not in the validation schema,
+        so `llm_report_schema` does not offer it back to the model.
+        """
+        if not self.premise_asserted:
+            return PremiseVerdict.NONE_ASSERTED
+        if not self.premise_measured:
+            # The distinction that was being lost. Evidence that does not reach the window
+            # cannot contradict what was asserted about it, whatever else it shows.
+            return PremiseVerdict.UNVERIFIABLE
+        return PremiseVerdict.FALSE if self.premise_contradicted else PremiseVerdict.HOLDS
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_a_stored_verdict(cls, data: object) -> object:
+        """Read reports written before the verdict was decomposed.
+
+        `_Strict` rejects unknown fields, so a stored report carrying `premise` would fail to
+        load and every captured run would stop being re-scorable. The stored value is dropped
+        rather than trusted: it is now derived, and a report whose three answers disagree with
+        its old label should be read as its answers say.
+        """
+        if isinstance(data, dict) and "premise" in data:
+            data = {k: v for k, v in data.items() if k != "premise"}
+        return data
+
     findings: list[Finding] = Field(default_factory=list)
     hypotheses: list[Hypothesis] = Field(default_factory=list)
     charts: list[ChartSpec] = Field(default_factory=list)

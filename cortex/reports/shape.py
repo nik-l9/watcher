@@ -141,19 +141,47 @@ _PREMISE_CHECK = (
     "report that was technically accurate throughout. If a comparison looks alarming only "
     "because the periods are different lengths, or the data is incomplete, or the metric "
     "changed definition, that *is* the answer rather than a caveat on it.\n"
-    "**Set `premise_checked` first, then `premise`.** In `premise_checked` write what checking "
-    "the assertion *found* -- the figures that settled it and over what window. Do not write "
-    'the question back: "signups fell in August versus July" is the assertion, not a '
-    'finding, and a verdict written after it has nothing to go on. "August holds 12 days of '
-    "data against July's 31; the daily rate is flat at ~157\" is a finding. Then `premise`: "
-    "`false` when the evidence contradicts the assertion, `unverifiable` when it cannot settle "
-    "it, `holds` when it is supported. In that order, because the verdict is a judgement about "
-    "the sentence above it -- an attempt that answered the verdict first set `holds` and then "
-    'wrote "No -- signups did not fall", and the field is what a reader and a scorer both take '
-    "as the answer. Putting the verdict in a field rather than only in prose is what lets a "
-    "reader see at a glance whether the question itself survived, instead of inferring it from "
-    "how the first sentence happens to be phrased -- which only works while the field agrees "
-    "with the prose."
+    "**Set `premise_checked` first, then answer the three questions after it.** In "
+    "`premise_checked` write what checking the assertion *found* -- the figures that settled "
+    'it and over what window. Do not write the question back: "signups fell in August versus '
+    'July" is the assertion, not a finding, and answers written after it have nothing to go '
+    'on. "August holds 12 days of data against July\'s 31; the daily rate is flat at ~157" '
+    "is a finding.\n"
+    "Then, in order: `premise_asserted` -- did the question claim something checkable at all? "
+    "`premise_measured` -- does your evidence actually cover the window it claims about? "
+    "`premise_contradicted` -- does that evidence contradict the claim?\n"
+    '**A question that asks for a number is not making a claim.** "Which month had the '
+    'highest daily rate", "how many accounts upgraded", "what is our conversion rate" '
+    "name nothing that could turn out to be false: answer `premise_asserted` false and answer "
+    "the question. It is true when the question says something about the data that the data "
+    'could contradict -- "signups fell", "checkout is slower on mobile", "the campaign '
+    'drove the spike". Answering true for a question that claims nothing puts a verdict on '
+    "an assertion nobody made.\n"
+    "**`premise_measured` asks whether you can judge the claim, not whether the window is "
+    "complete.** A series ending three days before the window does is still enough to say "
+    "what happened across two months: answer true, and put the short tail in `data_quality` "
+    "where caveats belong. **A half-finished month is measurable too** -- twelve days against "
+    "a full thirty-one cannot be compared as totals, and that is a reason to compare daily "
+    "rates instead, not a reason to decline. If the rate over the days you do have settles "
+    "the claim, you have measured it: answer true, and let `premise_contradicted` say what "
+    "the rate shows. Answer false only when the evidence cannot settle the claim by any "
+    "reading -- no rows at all for the window, or so few that a rate over them says nothing. "
+    "If you find yourself answering false to "
+    "`premise_measured` and true to `premise_contradicted`, you have almost certainly measured "
+    "it: you found the movement and noticed a gap. Answer `premise_measured` true and record "
+    "the gap.\n"
+    "**`premise_measured` is the one that gets skipped.** A query returning no rows for the "
+    "window asked about has not measured it. It has not shown the movement did not happen; it "
+    "has shown you cannot tell from here. Set `premise_measured` false and stop -- do not go "
+    "on to say the evidence contradicts something it never observed. This holds even when the "
+    "event is busy in other months and even when other events have data in those months: an "
+    "event whose history starts in July tells you nothing about March, and a project that "
+    "collects plenty now tells you nothing about a period it was not collecting in. The two "
+    "answers read very differently to someone deciding what to do -- one says the thing did "
+    "not happen, the other says go and find the data elsewhere.\n"
+    "These are asked separately, and in this order, because each is a fact about your evidence "
+    "that the next one depends on, and because asked as one four-way label the answer gets "
+    "chosen before the reasons for it exist."
 )
 
 
