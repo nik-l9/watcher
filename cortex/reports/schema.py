@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime
 import enum
 import uuid
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 from pydantic import (
     BaseModel,
@@ -516,18 +516,46 @@ class InvestigationReport(_Strict):
             return PremiseVerdict.UNVERIFIABLE
         return PremiseVerdict.FALSE if self.premise_contradicted else PremiseVerdict.HOLDS
 
+    #: How a verdict maps back onto the three answers that now determine it.
+    _FROM_VERDICT: ClassVar[dict[str, dict[str, bool]]] = {
+        "none_asserted": {"premise_asserted": False},
+        "unverifiable": {"premise_asserted": True, "premise_measured": False},
+        "false": {
+            "premise_asserted": True,
+            "premise_measured": True,
+            "premise_contradicted": True,
+        },
+        "holds": {
+            "premise_asserted": True,
+            "premise_measured": True,
+            "premise_contradicted": False,
+        },
+    }
+
     @model_validator(mode="before")
     @classmethod
     def _accept_a_stored_verdict(cls, data: object) -> object:
-        """Read reports written before the verdict was decomposed.
+        """Read a report that carries the old single `premise` field.
 
         `_Strict` rejects unknown fields, so a stored report carrying `premise` would fail to
-        load and every captured run would stop being re-scorable. The stored value is dropped
-        rather than trusted: it is now derived, and a report whose three answers disagree with
-        its old label should be read as its answers say.
+        load and every captured run would stop being re-scorable.
+
+        **Translated, not dropped.** An earlier version discarded the value, which made
+        `InvestigationReport(premise=PremiseVerdict.FALSE)` silently produce `none_asserted`
+        -- every caller that had not yet moved to the three answers kept working and kept
+        being wrong, which is worse than failing. Three tests caught it; nothing in
+        production would have.
+
+        The three answers win where both are given: they are what the model now writes, and a
+        stored verdict beside them is the derived copy of an older draft.
         """
-        if isinstance(data, dict) and "premise" in data:
-            data = {k: v for k, v in data.items() if k != "premise"}
+        if not isinstance(data, dict) or "premise" not in data:
+            return data
+        data = dict(data)
+        stated = data.pop("premise")
+        stated = getattr(stated, "value", stated)
+        for field, value in cls._FROM_VERDICT.get(stated, {}).items():
+            data.setdefault(field, value)
         return data
 
     findings: list[Finding] = Field(default_factory=list)
