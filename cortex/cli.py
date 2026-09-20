@@ -35,6 +35,11 @@ COMMANDS: dict[str, tuple[str, str, str]] = {
     ),
     "spend": ("cortex.spend", "main", "What each tenant is costing."),
     "eval": ("cortex.eval.__main__", "main", "Score the analyst against labelled fixtures."),
+    "questions": (
+        "cortex.eval.real_data",
+        "main",
+        "Build labelled questions from your own extracted data.",
+    ),
 }
 
 

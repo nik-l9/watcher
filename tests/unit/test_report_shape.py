@@ -10,12 +10,19 @@ report.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from cortex.agents.investigator import _drafting_instruction
 from cortex.eval.fixtures import SCENARIOS, by_name
 from cortex.eval.scorer import Scorer
-from cortex.reports.schema import Claim, Confidence, InvestigationReport, PremiseVerdict
+from cortex.reports.schema import (
+    Claim,
+    Confidence,
+    InvestigationReport,
+    PremiseVerdict,
+)
 from cortex.reports.shape import (
     AMBIGUITY_GUIDANCE,
     GUIDANCE,
@@ -308,7 +315,9 @@ class TestThePremiseVerdictIsStatedNotInferred:
 
     def test_the_stated_verdict_scores_it_correctly(self) -> None:
         truth = by_name("partial_month_false_premise").ground_truth
-        report = self._report(premise=PremiseVerdict.FALSE)
+        report = self._report(
+            premise_asserted=True, premise_measured=True, premise_contradicted=True
+        )
         dimension = Scorer()._premise_accuracy(truth, report, self._TEXT.lower())
         assert dimension.score == 1.0
         assert dimension.detail == "refuted the premise"
@@ -317,7 +326,9 @@ class TestThePremiseVerdictIsStatedNotInferred:
         """The field must not become a rubber stamp: a report that says the premise holds, on a
         scenario whose premise is false, is wrong however it phrases its prose."""
         truth = by_name("partial_month_false_premise").ground_truth
-        report = self._report(premise=PremiseVerdict.HOLDS)
+        report = self._report(
+            premise_asserted=True, premise_measured=True, premise_contradicted=False
+        )
         dimension = Scorer()._premise_accuracy(truth, report, self._TEXT.lower())
         assert dimension.score == 0.0
         assert "the report says the premise is holds" in dimension.detail
@@ -326,14 +337,23 @@ class TestThePremiseVerdictIsStatedNotInferred:
         """ "The evidence cannot settle it" is a different answer from "the evidence contradicts
         it", and this scenario's evidence does settle it."""
         truth = by_name("partial_month_false_premise").ground_truth
-        report = self._report(premise=PremiseVerdict.UNVERIFIABLE)
+        report = self._report(premise_asserted=True, premise_measured=False)
         assert Scorer()._premise_accuracy(truth, report, self._TEXT.lower()).score == 0.0
 
     def test_both_shapes_are_told_to_set_it(self) -> None:
         """Either kind of question can carry a premise, so the instruction cannot live on one."""
         for shape in (Shape.FACTUAL, Shape.CAUSAL):
-            assert "`premise`" in GUIDANCE[shape], shape
-            assert "`premise_checked`" in GUIDANCE[shape], shape
+            for field in ("`premise_checked`", "`premise_asserted`", "`premise_measured`"):
+                assert field in GUIDANCE[shape], (shape, field)
+
+    def test_both_shapes_are_warned_about_the_answer_that_gets_skipped(self) -> None:
+        """`premise_measured` is the one the measurement says is being skipped: 15 of 16
+        reports about windows their project never collected in said the evidence contradicts
+        the premise. The guidance has to name that case, not just list the fields."""
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "no rows for the window asked about has not measured it" in guidance, shape
+            assert "cannot tell from here" in guidance, shape
 
     def test_both_shapes_are_told_which_order_to_answer_them_in(self) -> None:
         """The prose has to agree with the schema, or it argues against the field order.
@@ -345,7 +365,13 @@ class TestThePremiseVerdictIsStatedNotInferred:
         """
         for shape in (Shape.FACTUAL, Shape.CAUSAL):
             guidance = GUIDANCE[shape]
-            assert "`premise_checked` first, then `premise`" in guidance, shape
+            assert "`premise_checked` first, then answer the three questions" in guidance, shape
+            # The three named in dependency order, matching the field order in the schema.
+            order = [
+                guidance.index(f"`{name}`")
+                for name in ("premise_asserted", "premise_measured", "premise_contradicted")
+            ]
+            assert order == sorted(order), shape
 
 
 class TestStatingTheAssumptionRatherThanAsking:
@@ -492,3 +518,129 @@ class TestTheCompoundClaimRule:
             guidance = GUIDANCE[shape]
             assert "write what checking" in guidance and "*found*" in guidance, shape
             assert "Do not write the question back" in guidance, shape
+
+
+class TestPartialCoverageIsStillMeasured:
+    """`premise_measured` must not be read as "every day is present".
+
+    Measured: a report about `$autocapture` for March against April answered
+    `premise_measured` false *and* `premise_contradicted` true, because the series stopped
+    three days before the requested end date. Its reading of the data was right -- the metric
+    rose -- and the derivation turned that correct refutation into an abstention.
+
+    The distinction matters in both directions, which is why the guidance cannot simply say
+    "partial windows are fine": `partial_month_false_premise` exists because a twelve-day
+    month compared against a thirty-one-day one makes an apparent fall an artefact, and there
+    the right answer is that the premise is false, not that nothing was measured.
+    """
+
+    def test_both_shapes_say_a_short_tail_is_still_measurable(self) -> None:
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "not whether the window is complete" in guidance, shape
+            assert "`data_quality`" in guidance, shape
+
+    def test_both_shapes_name_the_incoherent_pair(self) -> None:
+        """The combination that produced the bug is called out by name, since a model that
+        answers both that way has found the movement and is describing a gap."""
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            assert "you have almost certainly measured" in GUIDANCE[shape], shape
+
+    def test_an_incoherent_pair_still_abstains_rather_than_asserting(self) -> None:
+        """Derivation unchanged: if the two answers disagree, the cautious one wins.
+
+        The guidance is what stops the pair being emitted. Were it emitted anyway, deriving
+        `false` from "I could not measure it" would assert a contradiction the report has just
+        said it could not observe.
+        """
+        report = InvestigationReport(
+            question="Why did signups fall in March?",
+            executive_summary=[Claim(text="A claim.", evidence_ids=[uuid.uuid4()])],
+            premise_asserted=True,
+            premise_measured=False,
+            premise_contradicted=True,
+        )
+        assert report.premise is PremiseVerdict.UNVERIFIABLE
+
+
+class TestAQuestionAskingForANumberClaimsNothing:
+    """`none_asserted` was unreachable in practice, which makes a schema value dead.
+
+    Measured over thirty-two cases: eight of eight questions that assert nothing -- "which
+    month had the highest daily rate", "between A and B, which was higher" -- were answered
+    `holds`, every one diverging on `premise_asserted`, and every one naming the right answer.
+    Eight for eight is systematic rather than noise.
+
+    It misleads no reader, which is why it is scored benign and why it waited behind the
+    errors that do. But a verdict on an assertion nobody made is still a verdict nobody can
+    check.
+    """
+
+    def test_both_shapes_say_a_question_asking_for_a_number_asserts_nothing(self) -> None:
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "asks for a number is not making a claim" in guidance, shape
+            assert "Which month had the" in guidance, shape
+
+    def test_both_shapes_give_the_contrasting_case(self) -> None:
+        """A rule with only one side of the distinction invites over-applying it: the fix for
+        a dead `none_asserted` must not make `holds` and `false` unreachable instead."""
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "could contradict" in guidance, shape
+            assert "signups fell" in guidance, shape
+
+    def test_a_question_claiming_nothing_derives_none_asserted(self) -> None:
+        report = InvestigationReport(
+            question="Which month had the highest daily rate of signups?",
+            executive_summary=[
+                Claim(
+                    text="June 2026 had the highest daily rate, at 412 signups a day.",
+                    evidence_ids=[uuid.uuid4()],
+                )
+            ],
+            premise_asserted=False,
+        )
+        assert report.premise is PremiseVerdict.NONE_ASSERTED
+
+
+class TestATruncatedMonthIsStillMeasurable:
+    """The regression this wording caused, and the lesson it had been erasing.
+
+    `partial_month_false_premise` exists because August holds twelve days against July's
+    thirty-one, so the totals cannot be compared and the daily rate can -- and the rate is
+    flat, which makes the asserted fall false rather than unmeasurable. After
+    `premise_measured` was introduced, both partial-month scenarios answered it false and
+    came out `unverifiable`, taking the hand-written suite from 9/9 to 7/9.
+
+    Declining is not the safe answer here. A reader told "we cannot tell" goes looking for a
+    decline that the data already rules out.
+    """
+
+    def test_both_shapes_say_a_half_month_is_measurable_by_rate(self) -> None:
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "half-finished month is measurable" in guidance, shape
+            assert "compare daily rates instead" in guidance, shape
+
+    def test_both_shapes_keep_the_genuine_absence_case(self) -> None:
+        """The fix must not undo what it is qualifying: no rows still means not measured."""
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "no rows at all for the window" in guidance, shape
+            assert "cannot tell from here" in guidance, shape
+
+    def test_a_truncated_window_whose_rate_settles_it_derives_false(self) -> None:
+        report = InvestigationReport(
+            question="Did our signups fall from last month?",
+            executive_summary=[
+                Claim(
+                    text="Signups did not fall; the daily rate is flat at about 157.",
+                    evidence_ids=[uuid.uuid4()],
+                )
+            ],
+            premise_asserted=True,
+            premise_measured=True,
+            premise_contradicted=True,
+        )
+        assert report.premise is PremiseVerdict.FALSE

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,6 +113,54 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         "after changing a scoring dimension: the numbers are comparable with the original run "
         "because the same Scorer runs over the same rows.",
     )
+    parser.add_argument(
+        "--generated",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Run cases generated from a real extract instead of the hand-written suite, "
+        "capped at N per premise verdict. Their labels are computed from the data rather "
+        "than written by hand, and they are the only source of `unverifiable` cases -- the "
+        "class no hand-written scenario covers, and the one a three-way abstention "
+        "threshold cannot be calibrated without.",
+    )
+    parser.add_argument(
+        "--generated-data",
+        default=None,
+        metavar="DIR",
+        help="Extract directory for --generated. Defaults to $WATCHER_DATA. Holds real "
+        "business data and never lives inside this repository.",
+    )
+    parser.add_argument(
+        "--calibrate",
+        default=None,
+        metavar="DIR",
+        help="Fit an abstention threshold from a captured run of generated cases, calling no "
+        "provider. Accepts `latest`. Reads the labels the run wrote beside its bundles, so "
+        "the generation settings do not have to be repeated.",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.10,
+        help="Highest delivered-error rate --calibrate may certify (default 0.10).",
+    )
+    parser.add_argument(
+        "--generated-verdict",
+        action="append",
+        default=None,
+        metavar="VERDICT",
+        choices=["holds", "false", "unverifiable", "none_asserted"],
+        help="Run only generated cases with this computed premise verdict; repeatable. For "
+        "following up on one class without paying for the other three.",
+    )
+    parser.add_argument(
+        "--generated-seed",
+        type=int,
+        default=0,
+        help="Which sample of generated cases to run. A calibration fitted on a set that "
+        "cannot be rebuilt is not auditable, so this is recorded rather than implicit.",
+    )
     return parser.parse_args(argv)
 
 
@@ -122,6 +171,23 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
 #: was cleared, and the run could not be re-scored -- which is the entire purpose of capturing it.
 #: The fix is not remembering a flag, it is not needing to.
 CAPTURE_ROOT = Path("eval-runs")
+
+#: The computed premise labels for a `--generated` run, written beside its bundles.
+#:
+#: A threshold fitted from a capture must know what each case was labelled, and asking the
+#: caller to re-supply the cap and seed makes a calibration reproducible only by memory --
+#: and silently wrong if a default changes between the run and the fit.
+LABELS_FILE = "premise-labels.json"
+
+#: How a `--generated` capture records the settings that built it.
+#:
+#: Generation is deterministic, so the settings are enough to rebuild every case exactly --
+#: which is what lets a capture be re-scored later. Without it `--rescore` looks its
+#: scenarios up in the hand-written suite, does not find them, and dies on the first bundle.
+GENERATED_FILE = "generated-run.json"
+
+#: Files written beside the bundles that are not bundles.
+SIDECARS = frozenset({LABELS_FILE, GENERATED_FILE})
 
 
 def _capture_directory(args: argparse.Namespace) -> Path | None:
@@ -146,6 +212,41 @@ def _resolve_run(given: str) -> Path:
     if not runs:
         raise SystemExit(f"no captured runs under {CAPTURE_ROOT}/")
     return runs[0]
+
+
+def _generated_scenarios(args: argparse.Namespace) -> tuple[tuple[Any, ...], dict[str, str]]:
+    """Cases built from a real extract, sampled to a deliberate mix of premise verdicts.
+
+    Imported here rather than at module scope so the ordinary suite does not depend on an
+    extract existing, and so a machine without one still runs everything else.
+    """
+    from cortex.eval.generated import balanced, class_counts, generate
+    from cortex.eval.real_data import load_posthog
+
+    cases = balanced(
+        generate(load_posthog(args.generated_data)),
+        per_class=args.generated,
+        seed=args.generated_seed,
+    )
+    if args.generated_verdict:
+        # Filtered after balancing, not before, so a class keeps the same sample it would
+        # have had in a full run -- a follow-up must be comparable with what it follows up on.
+        wanted = set(args.generated_verdict)
+        cases = tuple(case for case in cases if case.premise_verdict in wanted)
+    if not cases:
+        raise SystemExit("the extract produced no cases; check --generated-data")
+    # To stderr with the rest of the progress, so stdout stays the scorecard alone.
+    sys.stderr.write(f"generated {len(cases)} case(s): {class_counts(cases)}\n")
+    return (
+        tuple(case.to_scenario() for case in cases),
+        {
+            case.name: {
+                "expected": case.premise_verdict,
+                "also_acceptable": list(case.also_acceptable),
+            }
+            for case in cases
+        },
+    )
 
 
 def _provider(args: argparse.Namespace) -> LLM:
@@ -173,6 +274,31 @@ def _investigator_factory(args: argparse.Namespace) -> Any:
     return Investigator
 
 
+def _generated_scenarios_for(directory: Path) -> dict[str, Any]:
+    """Rebuild a `--generated` capture's scenarios, keyed by name.
+
+    Empty for a capture of the hand-written suite, which is the ordinary case and needs
+    nothing. Generation is deterministic, so replaying the recorded settings reproduces the
+    same cases -- and a capture that records them stays re-scorable after the defaults move.
+    """
+    sidecar = directory / GENERATED_FILE
+    if not sidecar.exists():
+        return {}
+    settings = json.loads(sidecar.read_text())
+    from cortex.eval.generated import balanced, generate
+    from cortex.eval.real_data import load_posthog
+
+    cases = balanced(
+        generate(load_posthog(settings.get("data"))),
+        per_class=settings.get("per_class"),
+        seed=settings.get("seed", 0),
+    )
+    wanted = settings.get("verdicts")
+    if wanted:
+        cases = tuple(case for case in cases if case.premise_verdict in set(wanted))
+    return {case.name: case.to_scenario() for case in cases}
+
+
 async def _rescore(directory: Path) -> Any:
     """Re-score captured bundles, calling no provider.
 
@@ -182,10 +308,15 @@ async def _rescore(directory: Path) -> Any:
     than a new one to introduce.
     """
     from cortex.eval.replay import load_bundle, replay_bundle
+
+    generated = _generated_scenarios_for(directory)
     from cortex.eval.runner import EvalRun, ScenarioOutcome
     from cortex.eval.scorer import Scorer
 
-    bundles = sorted(directory.glob("*.json"))
+    # The sidecars a `--generated` run writes live beside the bundles and are not bundles.
+    # Globbing them in made `--rescore` die on the first one with a version mismatch, which
+    # names the file but reads as a corrupt capture.
+    bundles = sorted(p for p in directory.glob("*.json") if p.name not in SIDECARS)
     if not bundles:
         raise SystemExit(f"no bundles in {directory}")
 
@@ -210,7 +341,7 @@ async def _rescore(directory: Path) -> Any:
                     )
                     sys.stderr.write(f"{path.name}: rejected, not scored\n")
                     continue
-                scenario = by_name(bundle.scenario)
+                scenario = generated.get(bundle.scenario) or by_name(bundle.scenario)
                 (
                     tenant,
                     investigation_id,
@@ -255,12 +386,35 @@ async def _main(argv: list[str] | None = None) -> int:
         sys.stdout.write(render_spread(spread))
         return 0
 
+    if args.calibrate:
+        from cortex.eval.abstention import calibrate, load_bundles, points_from
+        from cortex.eval.abstention import render as render_threshold
+
+        directory = _resolve_run(args.calibrate)
+        labels_path = directory / LABELS_FILE
+        if not labels_path.exists():
+            raise SystemExit(
+                f"{directory} has no {LABELS_FILE}; it was not a --generated run, and a "
+                "threshold cannot be fitted without computed labels."
+            )
+        labels = json.loads(labels_path.read_text())
+        points = points_from(load_bundles(directory), labels)
+        threshold = calibrate(points, alpha=args.alpha)
+        sys.stdout.write(render_threshold(threshold, points))
+        return 0
+
     if args.rescore:
         run = await _rescore(_resolve_run(args.rescore))
         sys.stdout.write(run.render())
         return 0 if run.passed else 1
 
-    scenarios = tuple(by_name(name) for name in args.scenario) if args.scenario else SCENARIOS
+    premise_labels: dict[str, str] = {}
+    if args.generated is not None:
+        scenarios, premise_labels = _generated_scenarios(args)
+    elif args.scenario:
+        scenarios = tuple(by_name(name) for name in args.scenario)
+    else:
+        scenarios = SCENARIOS
     capture = _capture_directory(args)
 
     harness = EvalHarness(
@@ -279,7 +433,33 @@ async def _main(argv: list[str] | None = None) -> int:
             # whatever database it was pointed at.
             await session.rollback()
 
+    if premise_labels and capture is not None:
+        # Written beside the bundles so a threshold can be fitted later without repeating the
+        # cap and seed -- and so a capture stays self-describing if those defaults change.
+        capture.mkdir(parents=True, exist_ok=True)
+        (capture / LABELS_FILE).write_text(json.dumps(premise_labels, indent=2, sort_keys=True))
+        (capture / GENERATED_FILE).write_text(
+            json.dumps(
+                {
+                    "data": args.generated_data,
+                    "per_class": args.generated,
+                    "seed": args.generated_seed,
+                    "verdicts": args.generated_verdict,
+                },
+                indent=2,
+            )
+        )
+
     sys.stdout.write(run.render())
+    if premise_labels:
+        # Appended rather than replacing the scorecard: the scorecard still reports
+        # hallucinations and grounding, which mean the same thing here. What it cannot
+        # report is premise accuracy on cases with no labelled cause -- see
+        # `cortex.eval.premise_matrix`.
+        from cortex.eval.premise_matrix import outcomes_for
+        from cortex.eval.premise_matrix import render as render_matrix
+
+        sys.stdout.write(render_matrix(outcomes_for(premise_labels, run.outcomes)))
     # On stderr, so stdout stays the scorecard alone and stays pipeable. Printed because a
     # capture nobody can find is a capture nobody uses -- and the path is what `--rescore` and
     # `--variance` take.
