@@ -49,6 +49,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -65,7 +66,7 @@ from cortex.tools.base import (
     UpstreamError,
 )
 from cortex.tools.base import Tool as BaseTool
-from cortex.tools.http import DEFAULT_TIMEOUT, request_json
+from cortex.tools.http import DEFAULT_TIMEOUT, AuthRejected, request_json
 
 #: The MCP protocol version this adapter speaks.
 PROTOCOL_VERSION = "2025-06-18"
@@ -342,7 +343,8 @@ class MCPTool(BaseTool):
         return structured
 
     async def _rpc(self, ctx: ToolContext, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        async with self._client(ctx) as client:
+        bearer = await bearer_for(self.server, ctx.credential)
+        async with self._client(ctx, bearer) as client:
             # A session per call. Wasteful against a stateful server -- two extra round
             # trips -- but the alternative is a long-lived session held across an
             # investigation, which would need expiry and reconnection handling to be
@@ -374,7 +376,13 @@ class MCPTool(BaseTool):
             )
         return body
 
-    def _client(self, ctx: ToolContext) -> httpx.AsyncClient:
+    def _client(self, ctx: ToolContext, bearer: str | None = None) -> httpx.AsyncClient:
+        """The HTTP client for one call.
+
+        `bearer` is passed in rather than read from `ctx` because obtaining it may require a
+        token exchange, which is async, and a client factory that did network I/O could not
+        stay synchronous. The caller resolves it; this assembles the request.
+        """
         # Every request goes through this factory, so judging the address here is what makes
         # "nothing reaches the network unvalidated" true of the whole class rather than of
         # the call sites someone remembered. Here rather than at construction because DNS
@@ -387,9 +395,135 @@ class MCPTool(BaseTool):
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
         }
-        if ctx.credential:
-            headers["Authorization"] = f"Bearer {ctx.credential}"
+        token = bearer if bearer is not None else ctx.credential
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return httpx.AsyncClient(base_url=self.server.url, headers=headers, timeout=DEFAULT_TIMEOUT)
+
+
+#: Access tokens obtained by client-credentials exchange, keyed by `(token_url, client_id)`.
+#:
+#: In-process and unshared, which is the right scope for it: the token is a secret, and
+#: writing it to Postgres or Redis would create a second place for one to leak from. The cost
+#: is one extra exchange per worker after a restart, which is a round trip nobody notices.
+_TOKEN_CACHE: dict[tuple[str, str], tuple[str, float]] = {}
+
+#: Seconds shaved off a token's stated lifetime before it is treated as expired, so a token
+#: that was valid when checked is not rejected while the request it authorises is in flight.
+_EXPIRY_MARGIN = 60.0
+
+
+def _is_client_credentials(credential: str) -> bool:
+    """Whether a stored secret is a `client_id:client_secret` pair rather than a bearer token.
+
+    The colon convention is already how this codebase stores a two-part secret -- Mixpanel's
+    service account is `username:secret` -- so it needs no new field and no migration. A
+    bearer token never contains a colon; an OAuth client pair always does.
+    """
+    return ":" in credential
+
+
+async def _authorization_server(http: httpx.AsyncClient, server: MCPServer) -> dict[str, Any]:
+    """The server's OAuth metadata, per RFC 8414.
+
+    Fetched rather than configured because the endpoints are the server's to choose and a
+    hard-coded token URL is wrong the moment a vendor moves one.
+    """
+    origin = urlparse(server.url)
+    url = f"{origin.scheme}://{origin.netloc}/.well-known/oauth-authorization-server"
+    # Same host as the server, which `check_server_url` has already judged.
+    response = await http.get(url)
+    if response.status_code != 200:
+        raise AuthRejected(
+            f"mcp: {server.name} needs OAuth but publishes no authorization-server metadata "
+            f"at {url} ({response.status_code}); Cortex cannot obtain a token for it"
+        )
+    try:
+        metadata = response.json()
+    except ValueError as exc:
+        raise AuthRejected(f"mcp: {server.name} returned non-JSON OAuth metadata") from exc
+    return metadata if isinstance(metadata, dict) else {}
+
+
+async def _client_credentials_token(server: MCPServer, credential: str) -> str:
+    """Exchange a client id and secret for an access token.
+
+    **Why this and not the browser flow.** HubSpot's MCP server rejects a private-app token
+    with `400 Invalid request` and advertises itself as an OAuth-protected resource, which
+    reads at first like "a human must click through a consent screen". Its published
+    metadata says otherwise: `grant_types_supported` includes `client_credentials`, which is
+    a machine-to-machine exchange with no redirect, no PKCE and no browser. A server that
+    only offered `authorization_code` would still be out of reach, and the error below says
+    so rather than pretending.
+    """
+    client_id, _, client_secret = credential.partition(":")
+    cached = _TOKEN_CACHE.get((server.url, client_id))
+    now = time.monotonic()
+    if cached and cached[1] > now:
+        return cached[0]
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as http:
+        metadata = await _authorization_server(http, server)
+        grants = metadata.get("grant_types_supported") or []
+        if "client_credentials" not in grants:
+            raise AuthRejected(
+                f"mcp: {server.name} does not support the client_credentials grant "
+                f"(offers: {', '.join(str(g) for g in grants) or 'none'}). Cortex has no "
+                "browser to complete an authorization_code flow, so this server cannot be "
+                "connected without one."
+            )
+        token_url = str(metadata.get("token_endpoint") or "")
+        if not token_url:
+            raise AuthRejected(f"mcp: {server.name} publishes no token_endpoint")
+        check_server_url(token_url)
+        # `client_secret_post`: the pair goes in the form body, which is the only method
+        # HubSpot's metadata advertises.
+        response = await http.post(
+            token_url,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+    if response.status_code != 200:
+        # The body carries the OAuth error code -- `invalid_client`, `invalid_scope` -- which
+        # is the one thing that tells an operator whether the credential or the app is wrong.
+        raise AuthRejected(
+            f"mcp: {server.name} refused the client credentials "
+            f"({response.status_code}): {response.text[:200]}"
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise AuthRejected(f"mcp: {server.name} returned a non-JSON token response") from exc
+
+    token = body.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise AuthRejected(f"mcp: {server.name} returned no access_token")
+    try:
+        lifetime = float(body.get("expires_in") or 0)
+    except (TypeError, ValueError):
+        lifetime = 0.0
+    if lifetime > _EXPIRY_MARGIN:
+        _TOKEN_CACHE[(server.url, client_id)] = (token, now + lifetime - _EXPIRY_MARGIN)
+    return token
+
+
+async def bearer_for(server: MCPServer, credential: str | None) -> str | None:
+    """The value to send as `Authorization: Bearer`, exchanging first when required.
+
+    A plain token is used as-is -- PostHog's personal API key, say. A `client_id:secret`
+    pair is exchanged for a short-lived access token. Nothing else is inferred: a server
+    needing a flow Cortex cannot perform produces an error naming the grant it wanted.
+    """
+    if not credential:
+        return None
+    if not _is_client_credentials(credential):
+        return credential
+    return await _client_credentials_token(server, credential)
 
 
 #: The header a server uses to hand back a session, and the client must echo on every later
@@ -469,8 +603,11 @@ async def discover(
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": PROTOCOL_VERSION,
     }
-    if credential:
-        headers["Authorization"] = f"Bearer {credential}"
+    # Exchanged here, not by the caller: a server that needs an access token needs one for
+    # discovery too, and `cortex.connect` should not have to know which servers those are.
+    bearer = await bearer_for(server, credential) if client is None else credential
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     http = client or httpx.AsyncClient(
         base_url=server.url, headers=headers, timeout=DEFAULT_TIMEOUT
     )
