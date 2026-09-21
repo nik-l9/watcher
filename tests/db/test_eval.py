@@ -734,9 +734,13 @@ class TestHarnessEndToEnd:
 
         def _factory(**kwargs: object) -> Investigator:
             # Records that the harness asked for a loop, and that it was handed the
-            # same collaborators the default would have received.
+            # same collaborators the default would have received -- plus `today`, which
+            # is part of the contract rather than an extra: a rival loop scored on this
+            # scenario has to be asked the question on the same date the scenario was
+            # written for, or it is being graded against a different question.
             built.append("called")
-            assert set(kwargs) == {"llm", "registry", "executor", "employee"}
+            assert set(kwargs) == {"llm", "registry", "executor", "employee", "today"}
+            assert kwargs["today"] == scenario.as_of
             return Investigator(**kwargs)  # type: ignore[arg-type]
 
         outcome = await EvalHarness(llm=llm, investigator_factory=_factory).run_one(

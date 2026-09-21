@@ -460,6 +460,10 @@ class SufficiencyGate:
                 messages=[Message(role="user", content=rendered)],
                 schema=SUFFICIENCY_SCHEMA,
                 max_tokens=_MAX_TOKENS,
+                # Written once and never read: this prefix ends with content unique to
+                # one report, so nothing later shares it, and a cache write bills at 1.25x
+                # fresh input against a read at 0.1x. Storing it is a surcharge.
+                cacheable=False,
             )
         except LLMError as exc:
             return SufficiencyDecision(

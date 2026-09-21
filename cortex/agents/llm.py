@@ -173,6 +173,7 @@ class LLM(ABC):
         schema: dict[str, Any],
         max_tokens: int = 8192,
         timeout: float | None = None,
+        cacheable: bool = True,
     ) -> tuple[dict[str, Any], Usage]:
         """Output conforming to a JSON schema.
 
@@ -237,6 +238,7 @@ class RecordedLLM(LLM):
         schema: dict[str, Any],
         max_tokens: int = 8192,
         timeout: float | None = None,
+        cacheable: bool = True,
     ) -> tuple[dict[str, Any], Usage]:
         self.calls.append(
             {

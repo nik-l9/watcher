@@ -987,6 +987,10 @@ class AdversarialVerifier:
             try:
                 return await self._llm.structured(
                     system=SYSTEM_PROMPT,
+                    # Each verdict judges a different claim, so nothing later shares this
+                    # prefix and the 1.25x write premium is never repaid. Measured: seven
+                    # calls, seven writes, zero reads.
+                    cacheable=False,
                     messages=[Message(role="user", content=rendered)],
                     schema=VERDICT_SCHEMA,
                     max_tokens=1024,
@@ -1102,6 +1106,10 @@ class AdversarialVerifier:
         try:
             payload, usage = await self._llm.structured(
                 system=OPEN_QUESTION_PROMPT,
+                # Written once and never read: the prefix ends with content unique to
+                # this report, so no later request shares it. A cache write bills at
+                # 1.25x fresh input, so storing it is a surcharge, not a saving.
+                cacheable=False,
                 messages=[Message(role="user", content=rendered)],
                 schema=OPEN_QUESTION_SCHEMA,
                 max_tokens=1024,
