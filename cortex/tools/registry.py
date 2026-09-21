@@ -61,6 +61,10 @@ log = structlog.get_logger(__name__)
 #: Where `cortex.connect` records what a server advertised, inside `Credential.metadata_`.
 MCP_URL = "url"
 MCP_TOOLS = "mcp_tools"
+#: Set when an operator accepted a server whose tools are not declared read-only.
+MCP_ACCEPT_UNANNOTATED = "mcp_accept_unannotated"
+#: Tool names the operator restricted the server to, if any.
+MCP_ALLOW = "mcp_allow"
 
 
 async def mcp_tools_for_tenant(session: AsyncSession, tenant: TenantContext) -> list[MCPTool]:
@@ -117,7 +121,12 @@ async def mcp_tools_for_tenant(session: AsyncSession, tenant: TenantContext) -> 
                 "every tool must declare readOnlyHint: true",
             )
             continue
-        server = MCPServer(name=f"mcp_{row.label}", url=str(url))
+        server = MCPServer(
+            name=f"mcp_{row.label}",
+            url=str(url),
+            allow=frozenset(meta.get(MCP_ALLOW) or ()),
+            accept_unannotated=bool(meta.get(MCP_ACCEPT_UNANNOTATED)),
+        )
         try:
             tools.append(MCPTool(server, list(descriptors), credential_label=row.label))
         except MCPToolRefused as refused:
@@ -127,6 +136,21 @@ async def mcp_tools_for_tenant(session: AsyncSession, tenant: TenantContext) -> 
             # tool list.
             log.warning("mcp.all_tools_refused", label=row.label, reason=str(refused))
     return tools
+
+
+def surface_is_provably_read_only(registry: ToolRegistry) -> bool:
+    """Whether every capability offered has been established read-only.
+
+    **The product prints a promise before each investigation**, and a tenant who excepted a
+    server has made that promise false for themselves. Answering it from the assembled
+    registry rather than from a setting means the banner cannot drift from the tool surface
+    it describes: if an unannotated tool is reachable, this is False, whatever the config
+    says.
+    """
+    return not any(
+        isinstance(registry.get(name), MCPTool) and registry.get(name).server.accept_unannotated
+        for name in registry.tool_names
+    )
 
 
 async def registry_for_tenant(

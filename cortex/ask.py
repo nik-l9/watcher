@@ -490,13 +490,16 @@ async def _ask_real(args: argparse.Namespace) -> int:
         sys.stderr.write("--real needs a question; there is no fixture question to fall back on.\n")
         return 2
 
-    from cortex.tools.registry import NoToolsAvailable, registry_for_tenant
+    from cortex.tools.mcp import MCPTool
+    from cortex.tools.registry import (
+        NoToolsAvailable,
+        registry_for_tenant,
+        surface_is_provably_read_only,
+    )
 
     llm = build_llm(model=args.model, effort=args.effort)
 
     print(f"Investigating REAL data for tenant {args.tenant}: {args.question}", file=sys.stderr)
-    print("Read-only: no write capability exists in the tool registry.", file=sys.stderr)
-
     async with open_resources() as resources:
         # Memory is offered on real data and withheld on fixtures, because on a fixture
         # there is nothing ingested and a recall step that always returns "nothing
@@ -517,6 +520,30 @@ async def _ask_real(args: argparse.Namespace) -> int:
             except NoToolsAvailable as exc:
                 sys.stderr.write(f"{exc}\n")
                 return 2
+            # **Printed from the assembled registry, not from a constant.** This line used
+            # to be written before the registry existed, which made it a slogan rather than
+            # a statement about the run -- and it would have kept saying "read-only" for a
+            # tenant who had excepted an MCP server whose tools are not declared read-only.
+            # A promise the product cannot check is worse than no promise.
+            if surface_is_provably_read_only(registry):
+                print(
+                    "Read-only: no write capability exists in the tool registry.",
+                    file=sys.stderr,
+                )
+            else:
+                excepted = ", ".join(
+                    name
+                    for name in registry.tool_names
+                    if isinstance(registry.get(name), MCPTool)
+                    and registry.get(name).server.accept_unannotated
+                )
+                print(
+                    f"NOT provably read-only: {excepted} was connected with "
+                    "--accept-unannotated, so it offers tools its server has not declared "
+                    "read-only. Cortex will not ask them to write, but cannot prove they "
+                    "cannot.",
+                    file=sys.stderr,
+                )
             print(
                 f"Capabilities available to {tenant.tenant_slug}: {', '.join(registry.tool_names)}",
                 file=sys.stderr,
