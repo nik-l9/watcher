@@ -663,3 +663,77 @@ class TestAServerThatWantsAnAccessToken:
 
         with pytest.raises(AuthRejected, match="invalid_client"):
             await bearer_for(SERVER, "id:secret")
+
+
+class TestExceptingOneServerFromTheReadOnlyRule:
+    """The switch that can make the product's central claim untrue.
+
+    The guard requires `readOnlyHint: true` and the ecosystem went the other way: PostHog's
+    server advertises a single tool, `exec`, annotated `readOnlyHint: false` and
+    `destructiveHint: true`. A tenant who wants that server cannot have it under a blanket
+    rule. The answer is not to weaken the rule for everyone, but to let one server be
+    excepted -- deliberately, per server, and loudly.
+    """
+
+    @staticmethod
+    def _writeable(name: str = "exec") -> dict[str, Any]:
+        return {
+            "name": name,
+            "description": "Execute a PostHog command",
+            "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}},
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        }
+
+    def test_by_default_a_tool_not_declared_read_only_is_refused(self) -> None:
+        ok, why = admissible(self._writeable(), SERVER)
+        assert not ok
+        assert "readOnlyHint" in why
+
+    def test_the_refusal_names_the_flag_that_would_admit_it(self) -> None:
+        """An operator who wants this server needs to know the door exists, and what it
+        costs -- otherwise the only actionable reading is "give up"."""
+        _, why = admissible(self._writeable(), SERVER)
+        assert "--accept-unannotated" in why
+        assert "no longer provably read-only" in why
+
+    def test_an_excepted_server_admits_it(self) -> None:
+        server = MCPServer(name="mcp_posthog", url=SERVER.url, accept_unannotated=True)
+        ok, why = admissible(self._writeable(), server)
+        assert ok, why
+
+    def test_an_exception_does_not_waive_the_other_guards(self) -> None:
+        """Only the read-only requirement is excepted. A tool with no object schema still
+        has nothing to validate arguments against, and unvalidated arguments would reach
+        somebody else's API."""
+        server = MCPServer(name="mcp_posthog", url=SERVER.url, accept_unannotated=True)
+        no_schema = {**self._writeable(), "inputSchema": "not an object"}
+        ok, why = admissible(no_schema, server)
+        assert not ok
+        assert "inputSchema" in why
+
+    def test_the_allowlist_still_binds_an_excepted_server(self) -> None:
+        """Excepting a server and naming its tools are meant to be used together: the
+        surface stays one a human chose, not whatever the server advertises tomorrow."""
+        server = MCPServer(
+            name="mcp_posthog",
+            url=SERVER.url,
+            accept_unannotated=True,
+            allow=frozenset({"exec"}),
+        )
+        assert admissible(self._writeable("exec"), server)[0]
+        assert not admissible(self._writeable("delete_everything"), server)[0]
+
+    def test_the_analyst_is_told_the_tool_is_not_declared_read_only(self) -> None:
+        """The operator's acceptance is not the analyst's knowledge. The description is
+        what the analyst reads when choosing a tool, so the caveat has to live there."""
+        server = MCPServer(name="mcp_posthog", url=SERVER.url, accept_unannotated=True)
+        tool = MCPTool(server, [self._writeable()])
+        description = tool.capability("exec").description
+        assert "NOT declared this tool read-only" in description
+        assert "Do not ask it to create, update, delete or send anything" in description
+
+    def test_a_properly_annotated_tool_gets_no_such_warning(self) -> None:
+        """The caveat must stay rare enough to mean something."""
+        server = MCPServer(name="mcp_ok", url=SERVER.url, accept_unannotated=True)
+        tool = MCPTool(server, [_tool()])
+        assert "NOT declared" not in tool.capability("search_tickets").description

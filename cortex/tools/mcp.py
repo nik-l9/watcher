@@ -191,6 +191,21 @@ class MCPServer:
     #: Optional allowlist of tool names. Empty means "every tool that passes the guards".
     allow: frozenset[str] = field(default_factory=frozenset)
 
+    #: Admit tools this server has *not* declared read-only. Off unless an operator asks.
+    #:
+    #: **This is the one switch that can make the product's central claim untrue**, so it is
+    #: a per-server decision, recorded against the credential, and it changes what every
+    #: investigation prints. It exists because the ecosystem went the other way from the
+    #: guard: PostHog's server now advertises a single tool, `exec`, annotated
+    #: `readOnlyHint: false` and `destructiveHint: true`, so a tenant who wants PostHog over
+    #: MCP cannot have it under a blanket rule. The honest answer is not to weaken the rule
+    #: for everyone but to let one server be excepted, loudly.
+    #:
+    #: `allow` is the companion and is strongly advised with it: excepting a server *and*
+    #: naming the tools keeps the surface something a human chose rather than whatever the
+    #: server happens to advertise tomorrow.
+    accept_unannotated: bool = False
+
     def __post_init__(self) -> None:
         # Syntax at construction, address before connecting. A value that cannot be built
         # cannot be reached -- the reason `Capability` rejects a write capability here -- but
@@ -216,13 +231,15 @@ def admissible(descriptor: dict[str, Any], server: MCPServer) -> tuple[bool, str
 
     annotations = descriptor.get("annotations")
     annotations = annotations if isinstance(annotations, dict) else {}
-    if annotations.get("readOnlyHint") is not True:
+    if annotations.get("readOnlyHint") is not True and not server.accept_unannotated:
         # The conservative direction on purpose. An unannotated tool is not assumed dangerous; it
         # is assumed *unknown*, and a surface that admits the unknown is no longer a guarantee
         # that nothing destructive can be reached.
         return False, (
             f"{name} does not declare readOnlyHint: true. Cortex offers no capability it cannot "
-            "establish is read-only, so an unannotated tool is refused rather than assumed safe."
+            "establish is read-only, so an unannotated tool is refused rather than assumed safe. "
+            "Connect the server with --accept-unannotated to admit it anyway, which makes this "
+            "tenant's tool surface no longer provably read-only."
         )
 
     schema = descriptor.get("inputSchema")
@@ -297,9 +314,23 @@ class MCPTool(BaseTool):
             description=(
                 # The server's own description, with its origin stated. The analyst reasons about
                 # what a tool is for from this text, and "which system is this?" is part of that.
-                f"{description}\n\n(Provided by the {self.server.name!r} MCP server.)"
-                if description
-                else f"A tool provided by the {self.server.name!r} MCP server."
+                (
+                    f"{description}\n\n(Provided by the {self.server.name!r} MCP server.)"
+                    if description
+                    else f"A tool provided by the {self.server.name!r} MCP server."
+                )
+                # Stated to the analyst, not only to the operator. A tool that has not been
+                # established read-only is one the analyst should reach for last and never
+                # to change anything, and the only place that instruction reliably lands is
+                # the description it reads when choosing.
+                + (
+                    ""
+                    if (descriptor.get("annotations") or {}).get("readOnlyHint") is True
+                    else (
+                        " This server has NOT declared this tool read-only. Use it only to "
+                        "read. Do not ask it to create, update, delete or send anything."
+                    )
+                )
             ),
             params_schema=_tighten(descriptor["inputSchema"]),
             handler=self._handler(name),

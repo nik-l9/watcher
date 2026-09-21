@@ -32,6 +32,7 @@ from cortex.tools.registry import (
     NoToolsAvailable,
     gtm_analyst_registry,
     registry_for_tenant,
+    surface_is_provably_read_only,
 )
 
 
@@ -326,3 +327,89 @@ class TestMCPServersReachTheRegistry:
         registry = await registry_for_tenant(session, mine)
 
         assert not any(name.startswith("mcp_") for name in registry.tool_names)
+
+
+class TestTheReadOnlyPromiseMatchesTheSurface:
+    """Every investigation prints a claim about the tool surface. It has to be checkable.
+
+    The line used to be printed from a constant, before the registry existed, which made it
+    a slogan rather than a statement about the run. A tenant who excepted an MCP server
+    would still have been told the surface was read-only.
+    """
+
+    @staticmethod
+    def _writeable() -> dict:
+        return {
+            "name": "exec",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        }
+
+    async def test_an_ordinary_tenant_is_provably_read_only(self, session: AsyncSession) -> None:
+        tenant = await _tenant(session, "ro-plain")
+        await _connect(session, tenant, CredentialProvider.POSTHOG)
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert surface_is_provably_read_only(registry)
+
+    async def test_an_excepted_server_makes_the_surface_unprovable(
+        self, session: AsyncSession
+    ) -> None:
+        tenant = await _tenant(session, "ro-excepted")
+        await _connect(session, tenant, CredentialProvider.POSTHOG)
+        await _connect_mcp(
+            session,
+            tenant,
+            "posthog",
+            {
+                "url": "https://p.example/mcp",
+                "mcp_tools": [self._writeable()],
+                "mcp_accept_unannotated": True,
+                "mcp_allow": ["exec"],
+            },
+        )
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert "mcp_posthog" in registry.tool_names
+        assert not surface_is_provably_read_only(registry)
+
+    async def test_an_mcp_server_whose_tools_are_annotated_keeps_the_promise(
+        self, session: AsyncSession
+    ) -> None:
+        """The exception is what costs the guarantee, not MCP itself. A server that
+        annotates its tools properly is as safe as a native connector."""
+        tenant = await _tenant(session, "ro-annotated")
+        await _connect_mcp(
+            session,
+            tenant,
+            "linear",
+            {"url": "https://l.example/mcp", "mcp_tools": [_descriptor("list_issues")]},
+        )
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert "mcp_linear" in registry.tool_names
+        assert surface_is_provably_read_only(registry)
+
+    async def test_the_allowlist_is_carried_out_of_storage(self, session: AsyncSession) -> None:
+        """Stored with the credential, so it still applies after a restart -- and so a
+        server that starts advertising a new tool does not silently gain it."""
+        tenant = await _tenant(session, "ro-allow")
+        await _connect_mcp(
+            session,
+            tenant,
+            "posthog",
+            {
+                "url": "https://p.example/mcp",
+                "mcp_tools": [self._writeable()],
+                "mcp_accept_unannotated": True,
+                "mcp_allow": ["exec"],
+            },
+        )
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert registry.get("mcp_posthog").server.allow == frozenset({"exec"})
+        assert registry.get("mcp_posthog").server.accept_unannotated is True

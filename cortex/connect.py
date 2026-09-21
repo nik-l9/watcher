@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,7 +36,7 @@ from cortex.db.models import Credential, CredentialProvider, Tenant
 from cortex.memory.naming import graph_name_for_new_tenant
 from cortex.runtime.resources import open_resources
 from cortex.security.vault import encrypt_credential
-from cortex.tools.registry import MCP_TOOLS, MCP_URL
+from cortex.tools.registry import MCP_ACCEPT_UNANNOTATED, MCP_ALLOW, MCP_TOOLS, MCP_URL
 from cortex.tools.slack import IDENTITY_KEY
 
 #: Which environment variable holds each provider's secret, and what the secret is.
@@ -131,6 +132,20 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         "has just been run; the gate exists because a leak is the wrong risk to carry.",
     )
     parser.add_argument(
+        "--accept-unannotated",
+        action="store_true",
+        help="MCP only. Admit tools the server has not declared read-only. This makes the "
+        "tenant's tool surface no longer provably read-only, and every investigation says "
+        "so. Use --allow to name the tools as well.",
+    )
+    parser.add_argument(
+        "--allow",
+        default="",
+        help="MCP only. Comma-separated tool names to restrict the server to. Strongly "
+        "advised with --accept-unannotated, so the surface is one a human chose rather "
+        "than whatever the server advertises tomorrow.",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="Show what this tenant already has connected, and exit.",
@@ -204,8 +219,31 @@ async def _slack_identity(secret: str) -> str | None:
     return user_id if isinstance(user_id, str) and user_id else None
 
 
+def _mcp_options(meta: dict[str, str], args: argparse.Namespace) -> dict[str, Any]:
+    """The operator's MCP choices, folded into the credential's metadata.
+
+    Kept with the credential rather than in a config file, because the decision is about
+    *this* server for *this* tenant, and a setting that lives elsewhere is one nobody
+    revisits when the credential is rotated.
+    """
+    options: dict[str, Any] = dict(meta)
+    if getattr(args, "accept_unannotated", False):
+        options[MCP_ACCEPT_UNANNOTATED] = True
+    allow = [
+        name.strip() for name in str(getattr(args, "allow", "") or "").split(",") if name.strip()
+    ]
+    if allow:
+        options[MCP_ALLOW] = allow
+    return options
+
+
 async def _mcp_descriptors(
-    url: str, label: str, secret: str
+    url: str,
+    label: str,
+    secret: str,
+    *,
+    accept_unannotated: bool = False,
+    allow: frozenset[str] = frozenset(),
 ) -> tuple[list[dict], list[tuple[str, str]], str | None]:
     """Ask a server what it offers, and split it into what Cortex will admit and what it will not.
 
@@ -215,7 +253,12 @@ async def _mcp_descriptors(
     """
     from cortex.tools.mcp import MCPServer, admissible, discover
 
-    server = MCPServer(name=f"mcp_{label}", url=url)
+    # The same options the registry will build this server with. If discovery judged by
+    # different rules, connect would store a tool the registry then refuses, or refuse one
+    # it would have admitted -- and the operator would see neither.
+    server = MCPServer(
+        name=f"mcp_{label}", url=url, allow=allow, accept_unannotated=accept_unannotated
+    )
     try:
         descriptors = await discover(server, credential=secret or None)
     except Exception as exc:  # noqa: BLE001 - any failure here is "server did not answer"
@@ -273,13 +316,32 @@ async def _store(  # noqa: PLR0913
         if not url:
             print(f"  {provider.value}: skipped — needs --meta url=https://...")
             return False
-        admitted, refusals, error = await _mcp_descriptors(url, label, secret)
+        admitted, refusals, error = await _mcp_descriptors(
+            url,
+            label,
+            secret,
+            accept_unannotated=bool((metadata or {}).get(MCP_ACCEPT_UNANNOTATED)),
+            allow=frozenset((metadata or {}).get(MCP_ALLOW) or ()),
+        )
         if error:
             print(f"  {provider.value}: could not reach {url} — {error}")
             print("    credential stored anyway; re-run connect once the server responds")
         for name, reason in refusals:
             print(f"    refused {name}: {reason}")
         print(f"  {provider.value}: {len(admitted)} tool(s) admitted from {url}")
+        if admitted and (metadata or {}).get(MCP_ACCEPT_UNANNOTATED):
+            unannotated = [
+                str(d.get("name"))
+                for d in admitted
+                if (d.get("annotations") or {}).get("readOnlyHint") is not True
+            ]
+            if unannotated:
+                print(
+                    f"  {provider.value}: WARNING — {', '.join(unannotated)} "
+                    f"{'is' if len(unannotated) == 1 else 'are'} not declared read-only. "
+                    "This tenant's tool surface is no longer provably read-only, and every "
+                    "investigation will say so."
+                )
         metadata = {**(metadata or {}), MCP_TOOLS: admitted}
 
     if provider is CredentialProvider.SLACK:
@@ -375,7 +437,7 @@ async def _main(argv: list[str] | None = None) -> int:
                     tenant,
                     CredentialProvider(value),
                     args.label,
-                    _parse_meta(args.meta),
+                    _mcp_options(_parse_meta(args.meta), args),
                 ):
                     stored += 1
             await session.commit()
