@@ -264,9 +264,19 @@ class MCPTool(BaseTool):
 
     provider = CredentialProvider.MCP
 
-    def __init__(self, server: MCPServer, descriptors: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        server: MCPServer,
+        descriptors: list[dict[str, Any]],
+        *,
+        credential_label: str | None = None,
+    ) -> None:
         self.server = server
         self.name = server.name
+        # One provider covers every MCP server, so the label is what distinguishes this
+        # server's token from another's. Carried on the tool because the run-wide label
+        # cannot name two servers at once. See `Tool.credential_label`.
+        self.credential_label = credential_label
         self._descriptors = [d for d in descriptors if admissible(d, server)[0]][:MAX_TOOLS]
         if not self._descriptors:
             raise MCPToolRefused(
@@ -333,19 +343,28 @@ class MCPTool(BaseTool):
 
     async def _rpc(self, ctx: ToolContext, method: str, params: dict[str, Any]) -> dict[str, Any]:
         async with self._client(ctx) as client:
-            body = await request_json(
-                client,
-                "POST",
-                "",
-                tool=self.name,
-                json_body={
-                    "jsonrpc": "2.0",
-                    # A constant id is sufficient: one request per connection, and the response is
-                    # awaited before another is sent. Nothing here multiplexes.
-                    "id": 1,
-                    "method": method,
-                    "params": params,
-                },
+            # A session per call. Wasteful against a stateful server -- two extra round
+            # trips -- but the alternative is a long-lived session held across an
+            # investigation, which would need expiry and reconnection handling to be
+            # correct. One call, one session, is the version that cannot go stale.
+            session_id = await _handshake(client, self.server)
+            body = _json_of(
+                await request_json(
+                    client,
+                    "POST",
+                    "",
+                    tool=self.name,
+                    json_body={
+                        "jsonrpc": "2.0",
+                        # A constant id is sufficient: one request per connection, and the
+                        # response is awaited before another is sent. Nothing multiplexes.
+                        "id": 1,
+                        "method": method,
+                        "params": params,
+                    },
+                    headers={SESSION_HEADER: session_id} if session_id else None,
+                    raw_on_non_json=True,
+                )
             )
         error = body.get("error")
         if isinstance(error, dict):
@@ -356,8 +375,10 @@ class MCPTool(BaseTool):
         return body
 
     def _client(self, ctx: ToolContext) -> httpx.AsyncClient:
-        # Resolved and judged immediately before connecting, which is the only point where the
-        # answer is current. See `check_server_url` for what this closes and what it does not.
+        # Every request goes through this factory, so judging the address here is what makes
+        # "nothing reaches the network unvalidated" true of the whole class rather than of
+        # the call sites someone remembered. Here rather than at construction because DNS
+        # belongs next to the socket: its answer can change in between.
         check_server_url(self.server.url)
         headers = {
             "Content-Type": "application/json",
@@ -368,15 +389,69 @@ class MCPTool(BaseTool):
         }
         if ctx.credential:
             headers["Authorization"] = f"Bearer {ctx.credential}"
-        return httpx.AsyncClient(
-            base_url=self.server.url,
-            headers=headers,
-            timeout=DEFAULT_TIMEOUT,
-            # Explicit, not incidental. httpx defaults to not following redirects, and a
-            # redirect is how a validated public host hands the connection to a private
-            # one -- the standard bypass for exactly the check above.
-            follow_redirects=False,
-        )
+        return httpx.AsyncClient(base_url=self.server.url, headers=headers, timeout=DEFAULT_TIMEOUT)
+
+
+#: The header a server uses to hand back a session, and the client must echo on every later
+#: request. Lower-cased at lookup because httpx normalises header names.
+SESSION_HEADER = "mcp-session-id"
+
+
+def _json_of(body: dict[str, Any] | str) -> dict[str, Any]:
+    """One JSON-RPC response, whether the server answered JSON or an SSE stream.
+
+    **Streamable HTTP lets a server answer either way for the same request**, and which one
+    it picks is its business, not ours. A client that only parses JSON works against a fake
+    and hangs against half the real servers, so the stream form is parsed here rather than
+    treated as a transport error.
+    """
+    if isinstance(body, dict):
+        return body
+    for line in str(body).splitlines():
+        if line.startswith("data:"):
+            try:
+                parsed = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
+
+
+async def _handshake(http: httpx.AsyncClient, server: MCPServer) -> str | None:
+    """Initialise the session, returning the id the server wants echoed back.
+
+    **Why this exists, and why its absence was invisible for so long.** The transport
+    requires `initialize`, then a `notifications/initialized` acknowledgement, before any
+    other method. `discover` went straight to `tools/list`. Every unit test passed, because
+    a fake server answers whatever it is asked; every real server refused. HubSpot returned
+    `400 Invalid request` and PostHog simply waited for a session that never came, which
+    read as a timeout and looked like a network problem.
+
+    A server that returns no session id is not an error: the header is optional, and a
+    stateless server legitimately omits it.
+    """
+    response = await http.post(
+        "",
+        json={
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                # Cortex consumes tools and offers the server nothing: no sampling, no
+                # roots, no elicitation. Declaring that plainly is also a small safety
+                # property -- a server cannot ask us to call a model on its behalf.
+                "capabilities": {},
+                "clientInfo": {"name": "cortex", "version": "1"},
+            },
+        },
+    )
+    response.raise_for_status()
+    session_id = response.headers.get(SESSION_HEADER)
+    ack: dict[str, Any] = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    await http.post("", json=ack, headers={SESSION_HEADER: session_id} if session_id else None)
+    return session_id
 
 
 async def discover(
@@ -389,10 +464,6 @@ async def discover(
     result is what `MCPTool` is constructed from.
     """
     owned = client is None
-    if owned:
-        # Only when this function owns the client. A caller passing one in has taken
-        # responsibility for where it points -- which is how the tests drive a mock transport.
-        check_server_url(server.url)
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -401,18 +472,23 @@ async def discover(
     if credential:
         headers["Authorization"] = f"Bearer {credential}"
     http = client or httpx.AsyncClient(
-        base_url=server.url,
-        headers=headers,
-        timeout=DEFAULT_TIMEOUT,
-        follow_redirects=False,
+        base_url=server.url, headers=headers, timeout=DEFAULT_TIMEOUT
     )
+    # Re-checked here rather than trusted from construction: DNS can have changed its
+    # answer since. See `check_server_url` for what this closes and what it does not.
+    check_server_url(server.url)
     try:
-        body = await request_json(
-            http,
-            "POST",
-            "",
-            tool=server.name,
-            json_body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        session_id = await _handshake(http, server)
+        body = _json_of(
+            await request_json(
+                http,
+                "POST",
+                "",
+                tool=server.name,
+                json_body={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                headers={SESSION_HEADER: session_id} if session_id else None,
+                raw_on_non_json=True,
+            )
         )
     finally:
         if owned:

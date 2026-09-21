@@ -159,3 +159,140 @@ class TestItIsNotASecurityBoundary:
                 qualified_name="ga4__get_sessions",
                 params={"start_date": "2026-07-01", "end_date": "2026-07-07"},
             )
+
+
+async def _connect_mcp(
+    session: AsyncSession,
+    tenant: TenantContext,
+    label: str,
+    metadata: dict,
+) -> None:
+    """An MCP server credential, as `cortex.connect` writes it."""
+    wrapped, ciphertext = encrypt_credential(tenant.tenant_id, "mcp", "token")
+    session.add(
+        Credential(
+            tenant_id=tenant.tenant_id,
+            provider=CredentialProvider.MCP,
+            label=label,
+            wrapped_data_key=wrapped,
+            ciphertext=ciphertext,
+            metadata_=metadata,
+        )
+    )
+    await session.flush()
+
+
+def _descriptor(name: str) -> dict:
+    """A tool descriptor that passes admission: read-only, with an object schema."""
+    return {
+        "name": name,
+        "description": f"does {name}",
+        "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+        "annotations": {"readOnlyHint": True},
+    }
+
+
+class TestMCPServersReachTheRegistry:
+    """The wiring that was missing: a stored server becoming an offered tool.
+
+    `MCPTool` and `discover` were written, tested and never called. A tenant could store an
+    MCP credential and nothing happened, because `gtm_analyst_registry` hard-codes eight
+    tools and the filter can only remove from that set, never add.
+    """
+
+    async def test_a_connected_server_becomes_an_offered_tool(self, session: AsyncSession) -> None:
+        tenant = await _tenant(session, "mcp-offered")
+        await _connect_mcp(
+            session,
+            tenant,
+            "linear",
+            {"url": "https://mcp.example/mcp", "mcp_tools": [_descriptor("list_issues")]},
+        )
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert "mcp_linear" in registry.tool_names
+        assert "mcp_linear__list_issues" in {s["name"] for s in registry.llm_tool_specs()}
+
+    async def test_two_servers_are_offered_at_once_each_with_its_own_credential(
+        self, session: AsyncSession
+    ) -> None:
+        """One provider covers every MCP server, so the label is what separates them.
+
+        Without `Tool.credential_label` both tools would resolve against the run's single
+        label and both would miss -- which is why the tool carries its own.
+        """
+        tenant = await _tenant(session, "mcp-two")
+        await _connect_mcp(
+            session,
+            tenant,
+            "alpha",
+            {"url": "https://a.example/mcp", "mcp_tools": [_descriptor("a")]},
+        )
+        await _connect_mcp(
+            session,
+            tenant,
+            "beta",
+            {"url": "https://b.example/mcp", "mcp_tools": [_descriptor("b")]},
+        )
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert {"mcp_alpha", "mcp_beta"} <= set(registry.tool_names)
+        assert registry.get("mcp_alpha").credential_label == "alpha"
+        assert registry.get("mcp_beta").credential_label == "beta"
+
+    async def test_a_server_stored_before_discovery_existed_is_skipped_not_fatal(
+        self, session: AsyncSession
+    ) -> None:
+        """A credential written before this wiring has no descriptors. The fix is to re-run
+        connect, not to refuse to investigate -- the other connectors still work."""
+        tenant = await _tenant(session, "mcp-undiscovered")
+        await _connect(session, tenant, CredentialProvider.POSTHOG)
+        await _connect_mcp(session, tenant, "stale", {"url": "https://s.example/mcp"})
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert "posthog" in registry.tool_names
+        assert not any(name.startswith("mcp_") for name in registry.tool_names)
+
+    async def test_a_server_whose_every_tool_is_refused_does_not_break_the_run(
+        self, session: AsyncSession
+    ) -> None:
+        """Admission is the point of the adapter, so a server offering nothing admissible is
+        an expected outcome, not an error. The operator sees a warning; the investigation
+        proceeds on the connectors that do work."""
+        tenant = await _tenant(session, "mcp-refused")
+        await _connect(session, tenant, CredentialProvider.POSTHOG)
+        writes = {
+            "name": "delete_everything",
+            "inputSchema": {"type": "object"},
+            "annotations": {"readOnlyHint": False},
+        }
+        await _connect_mcp(
+            session, tenant, "hostile", {"url": "https://h.example/mcp", "mcp_tools": [writes]}
+        )
+
+        registry = await registry_for_tenant(session, tenant)
+
+        assert "posthog" in registry.tool_names
+        assert "mcp_hostile" not in registry.tool_names
+
+    async def test_an_mcp_tool_is_not_offered_to_a_tenant_that_did_not_connect_it(
+        self, session: AsyncSession
+    ) -> None:
+        """The same tenant scoping as every other provider. A server connected by one tenant
+        must not appear for another, which is F-01's shape."""
+        mine = await _tenant(session, "mcp-mine")
+        theirs = await _tenant(session, "mcp-theirs")
+        await _connect(session, mine, CredentialProvider.POSTHOG)
+        await _connect_mcp(
+            session,
+            theirs,
+            "private",
+            {"url": "https://p.example/mcp", "mcp_tools": [_descriptor("secret")]},
+        )
+
+        registry = await registry_for_tenant(session, mine)
+
+        assert not any(name.startswith("mcp_") for name in registry.tool_names)

@@ -35,6 +35,7 @@ from cortex.db.models import Credential, CredentialProvider, Tenant
 from cortex.memory.naming import graph_name_for_new_tenant
 from cortex.runtime.resources import open_resources
 from cortex.security.vault import encrypt_credential
+from cortex.tools.registry import MCP_TOOLS, MCP_URL
 from cortex.tools.slack import IDENTITY_KEY
 
 #: Which environment variable holds each provider's secret, and what the secret is.
@@ -202,6 +203,34 @@ async def _slack_identity(secret: str) -> str | None:
     return user_id if isinstance(user_id, str) and user_id else None
 
 
+async def _mcp_descriptors(
+    url: str, label: str, secret: str
+) -> tuple[list[dict], list[tuple[str, str]], str | None]:
+    """Ask a server what it offers, and split it into what Cortex will admit and what it will not.
+
+    Returns `(admitted, refusals, error)`. An unreachable server yields empty lists and a
+    message rather than raising: the credential is still worth storing, and the operator is
+    told to re-run rather than left with a silent gap.
+    """
+    from cortex.tools.mcp import MCPServer, admissible, discover
+
+    server = MCPServer(name=f"mcp_{label}", url=url)
+    try:
+        descriptors = await discover(server, credential=secret or None)
+    except Exception as exc:  # noqa: BLE001 - any failure here is "server did not answer"
+        return [], [], f"{type(exc).__name__}: {exc}"
+
+    admitted: list[dict] = []
+    refusals: list[tuple[str, str]] = []
+    for descriptor in descriptors:
+        ok, reason = admissible(descriptor, server)
+        if ok:
+            admitted.append(descriptor)
+        else:
+            refusals.append((str(descriptor.get("name", "?")), reason))
+    return admitted, refusals, None
+
+
 async def _store(  # noqa: PLR0913
     session: AsyncSession,
     tenant: Tenant,
@@ -226,6 +255,32 @@ async def _store(  # noqa: PLR0913
     #
     # Best-effort: a token that cannot introspect itself is still a usable token, and refusing
     # to store it would trade a working connector for a provenance nicety.
+    # What this MCP server offers, resolved once, here.
+    #
+    # `registry_for_tenant` runs at the start of every investigation and must not put a
+    # third party on that path: a server we do not operate, merely slow, would become an
+    # investigation that fails. So the descriptors are fetched where a human is watching
+    # and stored, and the registry reads storage. See `tools.registry.mcp_tools_for_tenant`.
+    #
+    # Refusals are printed rather than swallowed, because "the server offers 40 tools and
+    # Cortex admitted 3" is the operator's decision to make, and the reasons are specific:
+    # a tool that never declared itself read-only, or one that returns prose no claim can
+    # cite. Failing to reach the server does not block storing the credential -- the URL
+    # may be right and the server down -- but it does say so.
+    if provider is CredentialProvider.MCP:
+        url = (metadata or {}).get(MCP_URL)
+        if not url:
+            print(f"  {provider.value}: skipped — needs --meta url=https://...")
+            return False
+        admitted, refusals, error = await _mcp_descriptors(url, label, secret)
+        if error:
+            print(f"  {provider.value}: could not reach {url} — {error}")
+            print("    credential stored anyway; re-run connect once the server responds")
+        for name, reason in refusals:
+            print(f"    refused {name}: {reason}")
+        print(f"  {provider.value}: {len(admitted)} tool(s) admitted from {url}")
+        metadata = {**(metadata or {}), MCP_TOOLS: admitted}
+
     if provider is CredentialProvider.SLACK:
         identity = await _slack_identity(secret)
         if identity:

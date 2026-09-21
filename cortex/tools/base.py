@@ -274,6 +274,17 @@ class Tool(ABC):
     #: Which credential this tool needs. None for tools requiring no credential.
     provider: CredentialProvider | None
 
+    #: The credential label this tool resolves against, overriding the caller's.
+    #:
+    #: **Why a tool may pin its own.** A label normally selects *which account* an
+    #: investigation runs as -- two GA4 properties, say -- so it is chosen per run and
+    #: applies to every tool. That breaks down for MCP, where one provider covers every
+    #: server and each server is a separate credential under its own label. Two servers
+    #: connected at once would both look up the run's single label and both miss. A tool
+    #: built from a specific credential therefore carries that credential's label with it,
+    #: and the run-wide choice applies only to tools that have not pinned one.
+    credential_label: str | None = None
+
     def __init__(self) -> None:
         if not getattr(self, "name", None):
             raise ValueError(f"{type(self).__name__} must declare a name")

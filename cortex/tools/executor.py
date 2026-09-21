@@ -616,6 +616,11 @@ async def load_tool_context(
     if tool.provider is None:
         return ToolContext(tenant=tenant)
 
+    # A tool built from one specific credential resolves against that one. See
+    # `Tool.credential_label`: without this, two MCP servers connected at once would both
+    # look up the run's single label and both miss.
+    credential_label = tool.credential_label or credential_label
+
     row = (
         await session.execute(
             select(Credential).where(

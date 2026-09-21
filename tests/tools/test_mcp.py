@@ -8,6 +8,7 @@ honest about emptiness.
 
 from __future__ import annotations
 
+import json
 import socket
 from typing import Any
 
@@ -427,3 +428,95 @@ class TestATenantSuppliedUrlCannotReachInside:
         )
         with pytest.raises(InvalidParams, match="private or link-local"):
             check_server_url(self.PUBLIC)
+
+
+class TestTheTransportHandshake:
+    """Initialize, acknowledge, then ask — in that order, carrying the session.
+
+    **Written because its absence survived a full test suite.** `discover` went straight to
+    `tools/list`, every test here passed, and every real server refused: HubSpot answered
+    `400 Invalid request`, PostHog waited for a session that never came and looked like a
+    network timeout. A mock that answers any POST with the same body cannot tell the
+    difference, so these tests assert the *sequence* rather than the outcome.
+    """
+
+    async def test_initialize_comes_first_then_the_acknowledgement_then_the_request(
+        self,
+    ) -> None:
+        seen: list[str | None] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            seen.append(body.get("method"))
+            if body.get("method") == "initialize":
+                return httpx.Response(
+                    200,
+                    json=_rpc({"protocolVersion": "2025-06-18"}),
+                    headers={"mcp-session-id": "sess-123"},
+                )
+            return httpx.Response(200, json=_rpc({"tools": [_tool()]}))
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handler), base_url=SERVER.url
+        ) as client:
+            await discover(SERVER, credential=None, client=client)
+
+        assert seen == ["initialize", "notifications/initialized", "tools/list"]
+
+    async def test_the_session_id_is_echoed_on_every_later_request(self) -> None:
+        """A stateful server rejects a request that does not carry the session it issued."""
+        carried: list[str | None] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body.get("method") == "initialize":
+                return httpx.Response(200, json=_rpc({}), headers={"mcp-session-id": "sess-abc"})
+            carried.append(request.headers.get("mcp-session-id"))
+            return httpx.Response(200, json=_rpc({"tools": [_tool()]}))
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handler), base_url=SERVER.url
+        ) as client:
+            await discover(SERVER, credential=None, client=client)
+
+        assert carried and all(value == "sess-abc" for value in carried)
+
+    async def test_a_stateless_server_issuing_no_session_still_works(self) -> None:
+        """The header is optional. A server that omits it is not broken, and demanding one
+        would refuse every stateless implementation."""
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body.get("method") == "initialize":
+                return httpx.Response(200, json=_rpc({}))
+            return httpx.Response(200, json=_rpc({"tools": [_tool()]}))
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handler), base_url=SERVER.url
+        ) as client:
+            found = await discover(SERVER, credential=None, client=client)
+
+        assert [t["name"] for t in found] == ["search_tickets"]
+
+    async def test_an_sse_answer_is_read_as_json(self) -> None:
+        """Streamable HTTP lets a server answer the same request with a JSON body or an
+        event stream, at its own discretion. A client that only parses JSON works against a
+        fake and hangs against production."""
+        payload = json.dumps(_rpc({"tools": [_tool()]}))
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body.get("method") == "initialize":
+                return httpx.Response(200, json=_rpc({}))
+            return httpx.Response(
+                200,
+                content=f"event: message\ndata: {payload}\n\n".encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handler), base_url=SERVER.url
+        ) as client:
+            found = await discover(SERVER, credential=None, client=client)
+
+        assert [t["name"] for t in found] == ["search_tickets"]
