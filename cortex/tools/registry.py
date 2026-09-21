@@ -7,10 +7,11 @@ registry without touching connector code.
 
 from __future__ import annotations
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cortex.db.models import Credential
+from cortex.db.models import Credential, CredentialProvider
 from cortex.tenancy.context import TenantContext
 from cortex.tools.amplitude import AmplitudeTool
 from cortex.tools.base import ToolError, ToolRegistry
@@ -18,6 +19,7 @@ from cortex.tools.bigquery import BigQueryTool
 from cortex.tools.ga4 import GA4Tool
 from cortex.tools.github import GitHubTool
 from cortex.tools.hubspot import HubSpotTool
+from cortex.tools.mcp import MCPServer, MCPTool, MCPToolRefused
 from cortex.tools.mixpanel import MixpanelTool
 from cortex.tools.posthog import PostHogTool
 from cortex.tools.slack import SlackTool
@@ -53,6 +55,65 @@ def gtm_analyst_registry() -> ToolRegistry:
     return registry
 
 
+log = structlog.get_logger(__name__)
+
+
+#: Where `cortex.connect` records what a server advertised, inside `Credential.metadata_`.
+MCP_URL = "url"
+MCP_TOOLS = "mcp_tools"
+
+
+async def mcp_tools_for_tenant(session: AsyncSession, tenant: TenantContext) -> list[MCPTool]:
+    """One tool per MCP server this tenant has connected, built from stored descriptors.
+
+    **Built from storage rather than discovered here.** `registry_for_tenant` runs at the
+    start of every investigation, and `discover` is a network call against a server we do
+    not operate. Doing it here would put a third party on the critical path of every run:
+    latency on each investigation, and a server that is merely slow turning into an
+    investigation that fails. So discovery happens once, in `cortex.connect`, where a human
+    is watching and can read what was refused -- and this reads the result.
+
+    **A server that has not been discovered yet is skipped, not an error.** A credential
+    stored before this wiring existed has no descriptors, and the fix is to re-run connect,
+    not to refuse to investigate. Logged at warning so the gap is visible rather than
+    mysterious.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(Credential).where(
+                    Credential.tenant_id == tenant.tenant_id,
+                    Credential.provider == CredentialProvider.MCP,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    tools: list[MCPTool] = []
+    for row in rows:
+        meta = row.metadata_ or {}
+        url, descriptors = meta.get(MCP_URL), meta.get(MCP_TOOLS)
+        if not url or not descriptors:
+            log.warning(
+                "mcp.not_discovered",
+                label=row.label,
+                reason="no stored descriptors; re-run cortex-connect for this server",
+            )
+            continue
+        server = MCPServer(name=f"mcp_{row.label}", url=str(url))
+        try:
+            tools.append(MCPTool(server, list(descriptors), credential_label=row.label))
+        except MCPToolRefused as refused:
+            # Every tool the server offers failed admission. That is a fact about the
+            # server, not a reason to abandon the investigation: the other connectors
+            # still work, and the operator needs to see why rather than find an empty
+            # tool list.
+            log.warning("mcp.all_tools_refused", label=row.label, reason=str(refused))
+    return tools
+
+
 async def registry_for_tenant(
     session: AsyncSession, tenant: TenantContext, *, registry: ToolRegistry | None = None
 ) -> ToolRegistry:
@@ -82,6 +143,10 @@ async def registry_for_tenant(
     fixture run is unaffected by which credentials a tenant happens to hold.
     """
     source = registry or gtm_analyst_registry()
+    # Registered into the source set before filtering, so an MCP tool passes the same
+    # credential check as every other tool rather than bypassing it.
+    for mcp_tool in await mcp_tools_for_tenant(session, tenant):
+        source.register(mcp_tool)
     connected = set(
         (
             await session.execute(

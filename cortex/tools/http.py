@@ -84,16 +84,32 @@ async def request_json(
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
     timeout: httpx.Timeout | None = None,
-) -> dict[str, Any]:
+    headers: dict[str, str] | None = None,
+    raw_on_non_json: bool = False,
+) -> dict[str, Any] | str:
     """Perform a request and return parsed JSON, mapping failures to ToolErrors.
 
     `timeout` overrides the client's own for this one call — pass `SEARCH_TIMEOUT` for a
     full-text search, which is legitimately slower than a keyed read.
+
+    `headers` adds to the client's own, for a per-request value such as a session id.
+
+    `raw_on_non_json` returns the decoded body instead of raising when it will not parse.
+    MCP's Streamable HTTP transport answers the same request with either a JSON object or
+    an SSE stream, at the server's discretion, so for that caller a non-JSON body is a
+    normal response rather than a broken one. Everything else keeps the strict behaviour:
+    a connector that expects JSON and gets HTML has met an error, not a format.
+
+    The size bounding above applies either way, which is why this is a parameter here
+    rather than a second request path in the caller — an untrusted third-party server is
+    exactly what those bounds are for.
     """
     try:
         # Streamed so an oversized body is refused while it arrives, rather than
         # after it has already been read into memory.
         extra: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
+        if headers:
+            extra["headers"] = headers
         request = client.build_request(method, url, params=params, json=json_body, **extra)
         response = await client.send(request, stream=True)
         try:
@@ -133,6 +149,8 @@ async def request_json(
     try:
         body = json.loads(body_bytes)
     except ValueError as exc:
+        if raw_on_non_json:
+            return _decode(body_bytes)
         raise UpstreamError(
             f"{tool}: {_safe_target(method, url)} returned non-JSON: "
             f"{_truncate(_decode(body_bytes))}"

@@ -314,12 +314,22 @@ class IngestRunner:
 
 
 class _ToolStub:
-    """The minimum `load_tool_context` needs: a name and a provider.
+    """The minimum `load_tool_context` needs: a name, a provider, a credential label.
 
-    A stub rather than the real tool, because the credential loader only reads those two
-    fields and constructing a connector here would tie the runner to every connector's
-    constructor.
+    A stub rather than the real tool, because constructing a connector here would tie the
+    runner to every connector's constructor.
+
+    **It has to track what the loader reads.** This said "only those two fields" until
+    `Tool.credential_label` was added for MCP, and eleven ingest tests then failed on an
+    attribute this class did not have. The stub is duck-typed, so nothing warns when the
+    real interface grows -- keep it in step with `load_tool_context`, and prefer widening
+    it to loosening the loader, which would hide the same drift next time.
+
+    None, not a label: a syncer runs against the tenant's default credential for its
+    provider, and nothing ingests from an MCP server.
     """
+
+    credential_label: str | None = None
 
     def __init__(self, name: str, provider: CredentialProvider) -> None:
         self.name = name
