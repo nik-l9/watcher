@@ -22,6 +22,7 @@ import uuid
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from cortex.db.models import Credential, CredentialProvider, Tenant
 from cortex.memory.naming import graph_name_for_new_tenant
@@ -255,6 +256,35 @@ class TestMCPServersReachTheRegistry:
 
         assert "posthog" in registry.tool_names
         assert not any(name.startswith("mcp_") for name in registry.tool_names)
+
+    async def test_a_discovered_server_with_nothing_admissible_is_reported_as_such(
+        self, session: AsyncSession
+    ) -> None:
+        """Not the same as never discovered, and the operator advice differs.
+
+        PostHog's server is the real case: it advertises one tool, `exec`, annotated
+        `readOnlyHint: false` and `destructiveHint: true`. Telling an operator to re-run
+        connect would be advice whose only outcome is the identical refusal.
+        """
+        tenant = await _tenant(session, "mcp-nothing-admissible")
+        await _connect(session, tenant, CredentialProvider.POSTHOG)
+        await _connect_mcp(
+            session, tenant, "posthog", {"url": "https://p.example/mcp", "mcp_tools": []}
+        )
+
+        # structlog's own capture, not caplog: these go through structlog's handler and
+        # never reach the stdlib logger caplog watches, so caplog sees an empty string and
+        # the assertion passes for the wrong reason.
+        with capture_logs() as logs:
+            registry = await registry_for_tenant(session, tenant)
+
+        assert "posthog" in registry.tool_names
+        assert not any(name.startswith("mcp_") for name in registry.tool_names)
+        events = {entry.get("event") for entry in logs}
+        assert "mcp.nothing_admissible" in events
+        assert "mcp.not_discovered" not in events
+        reasons = " ".join(str(entry.get("reason", "")) for entry in logs)
+        assert "re-run" not in reasons
 
     async def test_a_server_whose_every_tool_is_refused_does_not_break_the_run(
         self, session: AsyncSession

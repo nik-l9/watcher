@@ -95,11 +95,26 @@ async def mcp_tools_for_tenant(session: AsyncSession, tenant: TenantContext) -> 
     for row in rows:
         meta = row.metadata_ or {}
         url, descriptors = meta.get(MCP_URL), meta.get(MCP_TOOLS)
-        if not url or not descriptors:
+        # **Three states, not two.** Never discovered, discovered and everything refused,
+        # and discovered with something usable. Collapsing the first two produced a warning
+        # telling an operator to re-run connect when connect had already run and refused
+        # every tool -- advice whose only outcome is the identical result. PostHog's server
+        # is the case that found this: it advertises one tool, `exec`, annotated
+        # `readOnlyHint: false` and `destructiveHint: true`, so nothing is admissible and
+        # re-running changes nothing.
+        if MCP_TOOLS not in meta or not url:
             log.warning(
                 "mcp.not_discovered",
                 label=row.label,
                 reason="no stored descriptors; re-run cortex-connect for this server",
+            )
+            continue
+        if not descriptors:
+            log.warning(
+                "mcp.nothing_admissible",
+                label=row.label,
+                reason="the server was queried and offered no tool Cortex can admit; "
+                "every tool must declare readOnlyHint: true",
             )
             continue
         server = MCPServer(name=f"mcp_{row.label}", url=str(url))
