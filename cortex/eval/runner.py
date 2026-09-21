@@ -464,6 +464,15 @@ class EvalHarness:
             registry=registry,
             executor=ToolExecutor(registry),
             employee=self._employee,
+            # **Pinned to the scenario's own horizon, so a fixture cannot age.** The opening
+            # prompt states today's date because every GTM question is relative to now, and a
+            # scenario plants its window relative to the date it was written on. Left to the
+            # real clock, `partial_month_false_premise` -- July plus twelve days of August,
+            # asked "did signups fall from last month" -- means July on the day it was
+            # written and August five weeks later, at which point "cannot tell" is the honest
+            # answer and the scenario scores it wrong. Two scenarios were failing on exactly
+            # this, and no amount of rewording the premise instruction could have fixed it.
+            today=scenario.as_of,
         )
 
         try:

@@ -168,6 +168,10 @@ class CompletenessJudge:
                 ],
                 schema=_SCHEMA,
                 max_tokens=_MAX_TOKENS,
+                # Written once and never read: this prefix ends with content unique to one
+                # report, so nothing later shares it, and a cache write bills at 1.25x fresh
+                # input against a read at 0.1x. Storing it is a surcharge.
+                cacheable=False,
             )
         except LLMError as exc:
             return AnswerAssessment(assessed=False, error=f"{type(exc).__name__}: {exc}")

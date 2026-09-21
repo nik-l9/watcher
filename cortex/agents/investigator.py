@@ -306,11 +306,21 @@ class Investigator:
         recall: HybridRecall | None = None,
         progress: ProgressSink | None = None,
         cancelled: Callable[[], Awaitable[bool]] | None = None,
+        today: date | None = None,
     ) -> None:
         self._llm = llm
         self._registry = registry
         self._executor = executor
         self._employee = employee
+        # **Pinned by the eval, real for production.** Every GTM question is relative to now,
+        # so the opening prompt states the date -- and a fixture that plants a window relative
+        # to a date it was written on drifts as real time passes. `partial_month_false_premise`
+        # plants July plus twelve days of August and expects "last month" to mean July; run on
+        # 20 September it means August, five weeks after the data stops, and the honest answer
+        # becomes "cannot tell" rather than "the premise is false". The scenario was not
+        # wrong; it had aged.
+        self._today = today
+
         # Optional, and off by default. Memory is prior context, not evidence: a report can
         # only cite a resolvable evidence_id, so recall can shorten the path to a hypothesis
         # but can never be the grounds for one. Injected rather than constructed here so an
@@ -629,6 +639,7 @@ class Investigator:
                     # to read would be a paragraph of instruction about a situation that does
                     # not exist.
                     unread=ledger.reminder(),
+                    today=self._today,
                 ),
             )
         ]
@@ -948,6 +959,14 @@ class Investigator:
                         schema=llm_report_schema(),
                         max_tokens=DRAFT_MAX_TOKENS,
                         timeout=DRAFT_TIMEOUT_SECONDS,
+                        # **Cached only if the repair reads it back, and it mostly does not.**
+                        # A write bills at 1.25x fresh input and a read at 0.1x, so caching
+                        # this call pays only when a second draft follows: break-even is a
+                        # repair rate of 28%. Measured across a full suite, nine drafts wrote
+                        # and none read -- the comment above, which called this "the largest
+                        # and most cacheable request we make", was right about the size and
+                        # wrong about the rest. Caching it costs $0.028 an investigation.
+                        cacheable=False,
                     )
             except LLMOutputTruncated as exc:
                 # Distinguished from a refusal because the responses are opposite: a refusal

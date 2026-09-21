@@ -148,7 +148,7 @@ _PREMISE_CHECK = (
     'on. "August holds 12 days of data against July\'s 31; the daily rate is flat at ~157" '
     "is a finding.\n"
     "Then, in order: `premise_asserted` -- did the question claim something checkable at all? "
-    "`premise_measured` -- does your evidence actually cover the window it claims about? "
+    "`premise_measured` -- can you judge that claim from the evidence you have? "
     "`premise_contradicted` -- does that evidence contradict the claim?\n"
     '**A question that asks for a number is not making a claim.** "Which month had the '
     'highest daily rate", "how many accounts upgraded", "what is our conversion rate" '

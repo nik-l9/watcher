@@ -215,7 +215,7 @@ class AnthropicLLM(LLM):
             max_retries=max_retries,
         )
 
-    def _shape(self, *, max_tokens: int) -> dict[str, Any]:
+    def _shape(self, *, max_tokens: int, cacheable: bool = True) -> dict[str, Any]:
         """The parameters whose acceptance depends on which model this is.
 
         Built from the card in one place, so both call paths agree. Before this existed
@@ -240,7 +240,12 @@ class AnthropicLLM(LLM):
                 "budget_tokens": min(_THINKING_BUDGET_TOKENS, shape["max_tokens"] // 2),
             }
 
-        if card.supports_prompt_cache:
+        # **Caching a request nothing will read back costs 25% extra, not nothing.** A write
+        # bills at 1.25x fresh input and a read at 0.1x, so the premium is only repaid once
+        # something reads it. The per-request log showed all seven verifier calls writing
+        # ~1.8k and reading zero: each judges a different claim, so no later call shares
+        # their prefix. For those, paying to store the request is a pure surcharge.
+        if card.supports_prompt_cache and cacheable:
             shape["cache_control"] = CACHE_CONTROL
         return shape
 
@@ -369,6 +374,7 @@ class AnthropicLLM(LLM):
         schema: dict[str, Any],
         max_tokens: int = 8192,
         timeout: float | None = None,
+        cacheable: bool = True,
     ) -> tuple[dict[str, Any], Usage]:
         if not self.card.supports_structured_outputs:
             # Refused rather than degraded to prose-parsing. The grounding gate operates
@@ -390,7 +396,7 @@ class AnthropicLLM(LLM):
             output_config=self._output_config(
                 {"format": {"type": "json_schema", "schema": transform_schema(schema)}}
             ),
-            **self._shape(max_tokens=max_tokens),
+            **self._shape(max_tokens=max_tokens, cacheable=cacheable),
         )
 
         if response.stop_reason == "refusal":

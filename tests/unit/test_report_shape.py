@@ -644,3 +644,28 @@ class TestATruncatedMonthIsStillMeasurable:
             premise_contradicted=True,
         )
         assert report.premise is PremiseVerdict.FALSE
+
+
+class TestThePremiseQuestionsDoNotContradictThemselves:
+    """The one-line definition and its elaboration have to ask the same question.
+
+    They did not. The ordered list asked whether the evidence "cover[s] the window it claims
+    about" while the paragraph below insisted the field "asks whether you can judge the claim,
+    not whether the window is complete". For a half-finished month those give opposite
+    answers, and `partial_month_false_premise` is built on exactly that case: twelve days
+    against thirty-one, a flat daily rate, and a premise that is false rather than
+    unmeasurable. The scenario passed twice and failed twice across four runs -- the coin
+    flip a self-contradicting instruction produces.
+    """
+
+    def test_the_short_definition_asks_about_judging_not_covering(self) -> None:
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "can you judge that claim from the evidence you have" in guidance, shape
+            assert "cover the window it claims about" not in guidance, shape
+
+    def test_the_elaboration_still_agrees_with_it(self) -> None:
+        for shape in (Shape.FACTUAL, Shape.CAUSAL):
+            guidance = GUIDANCE[shape]
+            assert "not whether the window is complete" in guidance, shape
+            assert "half-finished month is measurable" in guidance, shape
