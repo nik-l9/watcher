@@ -703,6 +703,30 @@ async def load_cited_evidence(
     return {row.id: row for row in rows}
 
 
+def _aggregates_first(payload: object) -> object:
+    """Order a payload so the scalars survive truncation and the rows are what gets cut.
+
+    **The truncation was severing exactly the fields claims are built from.** Rendering
+    used `sort_keys=True`, which is alphabetical, and `records` sorts before
+    `total_matching` just as `deals` sorts before `total_amount`. A payload of 62 deals at
+    `indent=2` is far past `max_chars`, so the cut landed inside the row list and the
+    counts and sums that follow it were never shown. Asked whether "9 won out of 71 closed"
+    was supported, the verifier truthfully answered that the evidence "never shows a total
+    count of 62 lost deals" -- because it had been cut off before reaching it. Every claim
+    citing an aggregate over a long list was unverifiable by construction, and the failure
+    looked exactly like a hallucinated number.
+
+    Scalars first, then the collections, each group alphabetical so the rendering stays
+    deterministic. Truncation now costs rows, which the judge can do without, instead of
+    the totals, which it cannot.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    scalar = {k: v for k, v in sorted(payload.items()) if not isinstance(v, list | dict)}
+    bulk = {k: v for k, v in sorted(payload.items()) if isinstance(v, list | dict)}
+    return {**scalar, **bulk}
+
+
 def render_evidence(rows: Iterable[Evidence], *, max_chars: int) -> list[str]:
     """Render evidence rows for a model to read, one block each.
 
@@ -712,7 +736,7 @@ def render_evidence(rows: Iterable[Evidence], *, max_chars: int) -> list[str]:
     """
     blocks: list[str] = []
     for row in rows:
-        payload = json.dumps(row.payload, indent=2, sort_keys=True, default=str)
+        payload = json.dumps(_aggregates_first(row.payload), indent=2, default=str)
         truncated = len(payload) > max_chars
         if truncated:
             payload = payload[:max_chars]

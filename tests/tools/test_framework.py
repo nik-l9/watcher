@@ -230,7 +230,22 @@ class TestShippedRegistry:
                 "recent_prs",
                 "release_summary",
             ],
-            "hubspot": ["activities", "closed_won", "companies", "contacts", "pipeline"],
+            # search was added after a live investigation asked for the closed-won
+            # *rate*. The five named capabilities could not express it -- there was no
+            # way to reach lost deals -- so the report divided a three-month flow by a
+            # point-in-time stock and led with the result. The fix is not a
+            # closed_lost capability: a rate needs lost deals, "by rep" needs owner, "by
+            # source" needs attribution, and hand-writing that cross-product never
+            # converges. `search` exposes the filter surface the other five are already
+            # thin wrappers over, guarded by `crmfilter`.
+            "hubspot": [
+                "activities",
+                "closed_won",
+                "companies",
+                "contacts",
+                "pipeline",
+                "search",
+            ],
             "slack": ["find_decision", "recent_threads", "search_messages"],
             "bigquery": ["list_queries", "run_named_query"],
             # The three "what changed" capabilities are the reason this connector
