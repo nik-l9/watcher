@@ -16,13 +16,16 @@ import httpx
 import pytest
 
 from cortex.tools.base import InvalidParams, ToolContext, UpstreamError
+from cortex.tools.http import AuthRejected
 from cortex.tools.mcp import (
+    _TOKEN_CACHE,
     MAX_TOOLS,
     RESULT_KEY,
     MCPServer,
     MCPTool,
     MCPToolRefused,
     admissible,
+    bearer_for,
     check_server_url,
     discover,
 )
@@ -307,13 +310,17 @@ def _stub(
     """Replace the tool's client factory, so its real headers and request construction run."""
     original = tool._client
 
-    def _factory(ctx: ToolContext) -> httpx.AsyncClient:
+    def _factory(ctx: ToolContext, bearer: str | None = None) -> httpx.AsyncClient:
         def _handler(request: httpx.Request) -> httpx.Response:
             if seen is not None:
                 seen.append(request)
+            # The handshake is answered so the real sequence runs; only `tools/call` is
+            # recorded against `body`, which is what these tests are about.
             return httpx.Response(200, json=body)
 
-        real = original(ctx)
+        # Mirrors the real signature: the bearer is resolved by the caller, because
+        # obtaining one may need a token exchange and a factory cannot await.
+        real = original(ctx, bearer)
         return httpx.AsyncClient(
             transport=httpx.MockTransport(_handler),
             base_url=real.base_url,
@@ -520,3 +527,139 @@ class TestTheTransportHandshake:
             found = await discover(SERVER, credential=None, client=client)
 
         assert [t["name"] for t in found] == ["search_tickets"]
+
+
+class TestAServerThatWantsAnAccessToken:
+    """OAuth client-credentials, which is what HubSpot's MCP server actually needs.
+
+    It rejects a private-app token with `400 Invalid request` and advertises itself as an
+    OAuth-protected resource, which reads like "a human must click a consent screen". Its
+    published metadata says otherwise: `grant_types_supported` includes `client_credentials`,
+    a machine-to-machine exchange with no redirect and no browser.
+    """
+
+    @staticmethod
+    def _patch(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport) -> None:
+        """Route the module's own client through a mock transport.
+
+        The real class is captured first. Patching `cortex.tools.mcp.httpx.AsyncClient`
+        rebinds the attribute on the shared `httpx` module, so a replacement that called
+        `httpx.AsyncClient` would re-enter itself -- which it did, as a RecursionError.
+        """
+        real = httpx.AsyncClient
+        monkeypatch.setattr(
+            "cortex.tools.mcp.httpx.AsyncClient",
+            lambda **kw: real(**{**kw, "transport": transport}),
+        )
+
+    @staticmethod
+    def _oauth_server(
+        *,
+        grants: list[str] | None = None,
+        token_status: int = 200,
+        token_body: dict[str, Any] | None = None,
+        seen: list[httpx.Request] | None = None,
+    ):
+        def _handler(request: httpx.Request) -> httpx.Response:
+            if seen is not None:
+                seen.append(request)
+            if request.url.path.endswith("/.well-known/oauth-authorization-server"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "issuer": "https://mcp.example",
+                        "token_endpoint": "https://mcp.example/oauth/v3/token",
+                        "grant_types_supported": (
+                            grants if grants is not None else ["client_credentials"]
+                        ),
+                    },
+                )
+            return httpx.Response(
+                token_status,
+                json=token_body
+                if token_body is not None
+                else {"access_token": "at-1", "expires_in": 1800},
+            )
+
+        return httpx.MockTransport(_handler)
+
+    async def test_a_plain_token_is_sent_unchanged(self) -> None:
+        """PostHog's personal API key is a bearer token, not a client pair, and must not be
+        put through an exchange it would fail."""
+        assert await bearer_for(SERVER, "phx_abc123") == "phx_abc123"
+
+    async def test_no_credential_stays_no_credential(self) -> None:
+        assert await bearer_for(SERVER, None) is None
+
+    async def test_a_client_pair_is_exchanged_for_an_access_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[httpx.Request] = []
+        transport = self._oauth_server(seen=seen)
+        self._patch(monkeypatch, transport)
+        _TOKEN_CACHE.clear()
+
+        token = await bearer_for(SERVER, "client-id:client-secret")
+
+        assert token == "at-1"
+        # Discovery first, then the exchange: the token endpoint is the server's to name.
+        assert seen[0].url.path.endswith("/.well-known/oauth-authorization-server")
+        body = seen[-1].content.decode()
+        assert "grant_type=client_credentials" in body
+        # client_secret_post: the pair goes in the form body, the only method HubSpot offers.
+        assert "client_id=client-id" in body
+        assert seen[-1].headers["content-type"].startswith("application/x-www-form-urlencoded")
+
+    async def test_the_token_is_reused_until_it_expires(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One exchange per token lifetime, not one per tool call."""
+        seen: list[httpx.Request] = []
+        transport = self._oauth_server(seen=seen)
+        self._patch(monkeypatch, transport)
+        _TOKEN_CACHE.clear()
+
+        await bearer_for(SERVER, "reuse-id:secret")
+        calls_after_first = len(seen)
+        await bearer_for(SERVER, "reuse-id:secret")
+
+        assert len(seen) == calls_after_first
+
+    async def test_a_token_with_no_lifetime_is_not_cached(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A server that states no expiry gets a fresh exchange each time. Caching for an
+        unknown duration is how a silently-expired token becomes an intermittent 401."""
+        seen: list[httpx.Request] = []
+        transport = self._oauth_server(seen=seen, token_body={"access_token": "at-2"})
+        self._patch(monkeypatch, transport)
+        _TOKEN_CACHE.clear()
+
+        await bearer_for(SERVER, "nolife-id:secret")
+        first = len(seen)
+        await bearer_for(SERVER, "nolife-id:secret")
+
+        assert len(seen) > first
+
+    async def test_a_server_offering_only_the_browser_flow_says_so(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cortex has no browser. The error names the grant that was wanted, because
+        "authentication failed" would send an operator hunting for a bad secret."""
+        transport = self._oauth_server(grants=["authorization_code"])
+        self._patch(monkeypatch, transport)
+        _TOKEN_CACHE.clear()
+
+        with pytest.raises(AuthRejected, match="client_credentials"):
+            await bearer_for(SERVER, "id:secret")
+
+    async def test_a_refused_client_pair_carries_the_oauth_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`invalid_client` is the one thing distinguishing a wrong secret from a wrong app."""
+        transport = self._oauth_server(token_status=401, token_body={"error": "invalid_client"})
+        self._patch(monkeypatch, transport)
+        _TOKEN_CACHE.clear()
+
+        with pytest.raises(AuthRejected, match="invalid_client"):
+            await bearer_for(SERVER, "id:secret")

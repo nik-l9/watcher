@@ -70,8 +70,9 @@ _ENV_BY_PROVIDER: dict[CredentialProvider, tuple[str, str]] = {
     # `--provider mcp --label linear` with its own URL in `--meta`.
     CredentialProvider.MCP: (
         "MCP_SERVER_TOKEN",
-        "bearer token for one MCP server (blank if it needs none); pass "
-        "--meta url=https://... and --label <server-name>",
+        "either a bearer token for one MCP server, or 'client_id:client_secret' if the "
+        "server wants OAuth (HubSpot does; PostHog takes a personal API key). Blank if it "
+        "needs neither. Pass --meta url=https://... and --label <server-name>",
     ),
     CredentialProvider.AMPLITUDE: (
         "AMPLITUDE_API_KEY",
