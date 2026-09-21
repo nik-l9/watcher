@@ -22,6 +22,9 @@ import httpx
 from cortex.db.models import CredentialProvider
 from cortex.tools.base import Capability, InvalidParams, ToolContext, ToolError, ToolResult
 from cortex.tools.base import Tool as BaseTool
+from cortex.tools.crmfilter import FILTERABLE, OBJECT_TYPES, OPERATORS
+from cortex.tools.crmfilter import describe as _describe_search
+from cortex.tools.crmfilter import validate as _validate_filters
 from cortex.tools.http import DEFAULT_TIMEOUT, SEARCH_TIMEOUT, request_json
 
 API_ROOT = "https://api.hubapi.com"
@@ -87,6 +90,33 @@ _ISO_DATE = {
 
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT, "default": 50}
 
+#: Search defaults to a full page where the named capabilities default to half of one.
+#:
+#: **Because a page is one request either way.** HubSpot caps a page at 100, so asking for
+#: 100 costs exactly what asking for 50 costs, and the difference is whether a population
+#: of 62 comes back whole. It was not academic: asked for a closed-won rate, the analyst
+#: found 62 lost deals, saw 50 of them, summed those and reported the total as the period's
+#: lost value. The verifier caught the figure -- the connector stops reporting a
+#: `total_amount` it cannot stand behind -- but catching it only removes the answer. The
+#: description tells the analyst to raise the limit when it needs amounts; it did not. A
+#: default that is right for the common case beats an instruction that gets ignored.
+_SEARCH_LIMIT = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": _MAX_LIMIT,
+    "default": _MAX_LIMIT,
+}
+
+#: Spelled out in the capability description, and generated from the allowlist rather than
+#: written beside it: a model that has to guess a property name spends a loop step finding
+#: out it guessed wrong, and a hand-written list would drift from the guard the first time
+#: either changed.
+_FILTERABLE_HELP = (
+    "Filterable properties -- "
+    + "; ".join(f"{obj}: {', '.join(sorted(FILTERABLE[obj]))}" for obj in OBJECT_TYPES)
+    + "."
+)
+
 
 class HubSpotTool(BaseTool):
     name = "hubspot"
@@ -133,6 +163,68 @@ class HubSpotTool(BaseTool):
                 },
                 handler=self.closed_won,
                 result_key="deals",
+            ),
+            Capability(
+                name="search",
+                description=(
+                    "Search deals, contacts or companies with your own filters. Use this "
+                    "whenever the named capabilities cannot express the question -- lost "
+                    "deals, a win rate, a breakdown by owner, type or source. A win rate "
+                    "needs two searches: hs_is_closed_won=true and hs_is_closed_lost=true "
+                    "over the same closedate range, so both outcomes share a denominator. "
+                    "Do not divide closed deals by currently-open ones: open deals are a "
+                    "snapshot with no time bound, and the ratio means nothing. "
+                    "Count with total_matching, which covers every match; records is "
+                    "capped by limit, and when it is capped no total_amount is reported "
+                    "because a sum over one page is not the population's. Raise limit "
+                    "(max 100) if you need the money as well as the count. " + _FILTERABLE_HELP
+                ),
+                params_schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["object_type", "filters"],
+                    "properties": {
+                        "object_type": {"type": "string", "enum": list(OBJECT_TYPES)},
+                        "filters": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 8,
+                            "description": (
+                                "ANDed together. Dates are written as YYYY-MM-DD and "
+                                "converted for you."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["property"],
+                                "properties": {
+                                    "property": {"type": "string"},
+                                    "operator": {
+                                        "type": "string",
+                                        "enum": sorted(OPERATORS),
+                                        "default": "EQ",
+                                    },
+                                    "value": {
+                                        "type": ["string", "number", "boolean"],
+                                        "description": "For every operator but IN/NOT_IN.",
+                                    },
+                                    "high_value": {
+                                        "type": ["string", "number"],
+                                        "description": "Upper bound, BETWEEN only.",
+                                    },
+                                    "values": {
+                                        "type": "array",
+                                        "items": {"type": ["string", "number"]},
+                                        "description": "IN and NOT_IN only.",
+                                    },
+                                },
+                            },
+                        },
+                        "limit": _SEARCH_LIMIT,
+                    },
+                },
+                handler=self.search,
+                result_key="records",
             ),
             Capability(
                 name="contacts",
@@ -374,6 +466,58 @@ class HubSpotTool(BaseTool):
                 f"hubspot://crm/v3/objects/deals/search?closed_won={start_date}..{end_date}"
             ),
         )
+
+    async def search(
+        self,
+        ctx: ToolContext,
+        *,
+        object_type: str,
+        filters: list[dict[str, Any]],
+        limit: int = _MAX_LIMIT,
+    ) -> ToolResult:
+        """The general case the five named capabilities are special cases of.
+
+        They stay: each carries a description telling the analyst *when* to reach for it,
+        and that guidance is most of what makes the loop pick the right call. This is for
+        the questions none of them can express.
+        """
+        built = _validate_filters(object_type, filters)
+        properties = _PROPERTIES_FOR[object_type]
+        raw = await self._search(
+            ctx, object_type, filters=built, properties=properties, limit=limit
+        )
+        owners = await self._owners(ctx) if object_type == "deals" else {}
+        shape = _SHAPERS[object_type]
+        records = [
+            shape(record, owners) if object_type == "deals" else shape(record)
+            for record in _results(raw)
+        ]
+        payload: dict[str, Any] = {
+            "object_type": object_type,
+            # Echoed as written, so a reader can see what was asked without decoding epochs.
+            "filters": filters,
+            # **The count that answers rate questions.** `records` is capped by `limit`,
+            # so counting it understates any population bigger than the page. HubSpot
+            # reports the true match count, and a win rate computed from `count` instead
+            # of this would be wrong in exactly the cases that matter.
+            "total_matching": raw.get("total"),
+            "returned": len(records),
+            "truncated": raw.get("truncated"),
+            "records": records,
+        }
+        if object_type == "deals":
+            # **A sum is only a total when the page held everything.** `records` is capped
+            # by `limit`; `total_matching` is the whole population. Reporting the one as
+            # `total_amount` beside the other is the flow-against-stock error that prompted
+            # this capability, in a new costume: "62 lost deals worth $3,655,000" where the
+            # money is the first 50 of them. So the population-level key exists only when
+            # the population was actually seen, and the partial sum is named for what it is.
+            amount = _sum_amounts(records)
+            if raw.get("truncated"):
+                payload["amount_of_returned"] = amount
+            else:
+                payload["total_amount"] = amount
+        return ToolResult(payload=payload, source_ref=_describe_search(object_type, filters))
 
     async def contacts(
         self,
@@ -656,3 +800,19 @@ def _engagement_summary(engagement: str, props: dict[str, Any]) -> str | None:
         return None
     collapsed = " ".join(str(text).split())
     return collapsed if len(collapsed) <= 500 else collapsed[:500] + "…"
+
+
+#: Which properties each object type returns, and how a record is shaped. Keyed by the same
+#: strings as `crmfilter.OBJECT_TYPES`, so a new object type fails loudly here rather than
+#: returning records with no fields.
+_PROPERTIES_FOR: dict[str, list[str]] = {
+    "deals": _DEAL_PROPERTIES,
+    "contacts": _CONTACT_PROPERTIES,
+    "companies": _COMPANY_PROPERTIES,
+}
+
+_SHAPERS: dict[str, Any] = {
+    "deals": _deal,
+    "contacts": _contact,
+    "companies": _company,
+}
