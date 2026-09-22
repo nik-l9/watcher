@@ -122,8 +122,16 @@ def render_payload(payload: Any) -> str:
     Shared with the investigator so a digest's claimed saving is measured against the string
     the model would otherwise have received, rather than against a differently-formatted
     approximation of it.
+
+    `ensure_ascii=False` because this string is read by a model, not parsed by a machine.
+    The default renders a customer called "Sch\u00f6nherr" as `Sch\\u00f6nherr` and an
+    em-dash as `\\u2014`, and the model does not merely misread them -- it *copies the
+    convention*, and writes escapes into its own prose. A real HubSpot run answered "the
+    closed-won rate was 12.3% \\u2014 9 deals won", which is what a customer would have
+    read in their report. No fixture caught it in 2,800 tests because every fixture is
+    pure ASCII; only real data has umlauts and typographic dashes in it.
     """
-    return json.dumps(payload, indent=2, sort_keys=True, default=str)
+    return json.dumps(payload, indent=2, sort_keys=True, default=str, ensure_ascii=False)
 
 
 @dataclass(frozen=True, slots=True)

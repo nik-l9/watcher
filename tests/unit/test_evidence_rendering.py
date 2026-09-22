@@ -102,3 +102,24 @@ class TestTruncationCutsRowsNotTotals:
         row = _Row(payload={"records": [{"z": 1, "a": 2}], "total_matching": 1})
         [block] = render_evidence([row], max_chars=10_000)
         assert block.index('"z": 1') < block.index('"a": 2')
+
+
+class TestTheVerifierSeesRealCharacters:
+    """The verifier judges a claim against the evidence text it is shown.
+
+    Escaped non-ASCII makes that comparison harder than it needs to be: a claim quoting a
+    customer's name as "Schonherr" with an o-umlaut, checked against evidence rendering it
+    as `Sch\\u00f6nherr`, is a string mismatch invented by the renderer.
+    """
+
+    def test_a_payload_with_non_ascii_is_shown_unescaped(self) -> None:
+        row = _Row(payload={"total_matching": 1, "records": [{"name": "Mölnlycke — Q3"}]})
+        [block] = render_evidence([row], max_chars=10_000)
+        assert "Mölnlycke — Q3" in block
+        assert "\\u" not in block
+
+    def test_parameters_with_non_ascii_are_shown_unescaped(self) -> None:
+        row = _Row(payload={"rows": []}, params={"query": "Ørsted"})
+        [block] = render_evidence([row], max_chars=10_000)
+        assert "Ørsted" in block
+        assert "\\u00d8" not in block
