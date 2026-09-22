@@ -1,0 +1,109 @@
+Investigating: Why did signups drop in mid-June 2026?
+Dataset: tempting_coincidence (synthetic, labelled)  model: claude-sonnet-5  effort: low
+This takes a few minutes. Progress:
+  gathered 20 observations in 95s; grounding the report
+  verifying each claim against its own evidence
+  sufficiency gate: skipped, this report asserts no cause (0.0s)
+
+==============================================================================
+Q: Why did signups drop in mid-June 2026?
+==============================================================================
+
+Confidence: low
+Took 95s over 8 steps, 33,228 tokens, 20 observations gathered, 14 cited
+
+ANSWER
+------------------------------------------------------------------------------
+  Signups genuinely dropped by about 50% starting 2026-06-16/17 (from ~214/day to ~107/day), a shift confirmed statistically and sustained through the end of available data on 2026-06-29.  [posthog.event_trend abc94eae]
+  No cause was found in any connected system: GitHub shows no commits, PRs, or deployments to the product or marketing-site repos in the surrounding weeks, PostHog has no matching feature flag or annotation, and Slack has no message or recorded decision referencing the drop.  [github.commits 0545e17f, github.deployment_history 14037068, github.commits a8857c7f, posthog.feature_flags 3fd38237, posthog.annotations 2b3f4af9, slack.search_messages 39c57e0f, slack.search_messages 8d8df5ac, slack.search_messages f67a7149, slack.find_decision 5f0ce315]
+  The uniform silence across every connected source is itself notable and should be checked as a possible data-collection gap before concluding no cause exists, and the actual driver should be sought outside these tools (e.g. paid acquisition, an external partner, or infra changes not tracked in GitHub/PostHog/Slack).  [github.commits 0545e17f, slack.search_messages 39c57e0f]
+
+FINDINGS
+------------------------------------------------------------------------------
+  Signups fell by ~50% starting 2026-06-16/17, sustained through month end  (high)
+    - Daily signup count (event 'user signed up') averaged ~214.5/day before 2026-06-16 and ~107/day after, a level shift of -50.1% that a permutation test distinguishes from noise (p=0.0435).  [posthog.event_trend abc94eae]
+    - The lower rate (roughly 93-109 signups/day) persisted through the end of available data on 2026-06-29, indicating a sustained step change rather than a brief dip.  [posthog.event_trend abc94eae]
+  No product, marketing, or engineering artifact in the connected systems coincides with or explains the shift  (low)
+    - acme/product had zero commits recorded between 2026-06-10 and any later date checked through 2026-06-25, and zero deployments to either the web-preview or web-live environment in this period.  [github.commits 0545e17f, github.deployment_history 14037068]
+    - No pull requests of any state exist for acme/product, and a feature search for 'signup' in that repository returned no results.  [github.recent_prs 9c1f39f3, github.find_feature 7150e133]
+    - acme/marketing-site also had zero commits between 2026-06-10 and 2026-06-20.  [github.commits a8857c7f]
+    - No PostHog feature flag matching 'signup' exists, and no annotation matching 'signup' was recorded on the signups metric.  [posthog.feature_flags 3fd38237, posthog.annotations 2b3f4af9]
+    - Slack search for 'signups drop', 'signup broken', 'signup', and 'onboarding' across June 2026 (and a decision search for topic 'signup') returned zero matching messages or decisions.  [slack.search_messages 39c57e0f, slack.search_messages a1778582, slack.search_messages 8d8df5ac, slack.search_messages f67a7149, slack.find_decision 5f0ce315]
+
+CHARTS
+------------------------------------------------------------------------------
+  user signed up over time
+  value
+    value              |▇▇▆▇▇██▇█▇▇▇▆█▇▇██▇█▇▇▇████▇▇▇▇▇▇▁▁▁▁▁▂▁▁▁▂▁▂▁|  93 → 230
+                        2026-05-15 … 2026-06-29
+
+
+HYPOTHESES TESTED
+------------------------------------------------------------------------------
+  [inconclusive] A code deploy or feature change to the product app around 2026-06-16 caused the signup drop.
+      No commits or deployments exist for acme/product in the entire surrounding window, which would rule this out directly -- but this null result is equally consistent with an instrumentation or connector gap as with a genuinely quiet repo, so it is treated as inconclusive rather than a hard contradiction.
+  [inconclusive] A marketing-site change (e.g. to the signup landing page or campaign) drove the drop.
+      No commits to acme/marketing-site appear in the window either, and no Slack discussion references any marketing or onboarding change; without a positive signal this cannot be confirmed or ruled out on direct evidence.
+  [contradicted] An internal team discussion or incident acknowledges the signup drop and names a cause.
+      Slack searches for 'signups drop', 'signup', and 'onboarding' in the relevant window, and a decision search for topic 'signup', all returned zero results, indicating no team conversation exists on record about this.
+
+RECOMMENDATIONS
+------------------------------------------------------------------------------
+  P1 Check the signup event's client/server instrumentation and any analytics SDK or tracking-plan change around 2026-06-16-17 directly with the engineering team, since no repository, deployment, or Slack record in the connected tools captures a cause.
+      why: The magnitude and abruptness of the shift (a clean halving sustained for two weeks) is consistent with either a real demand-side event or an instrumentation change, and none of the connected systems (GitHub, PostHog, Slack) hold a record of either as of this investigation.
+      [posthog.event_trend abc94eae, posthog.list_events 0f19078e]
+  P2 Verify with the team whether any change outside the tools connected here (e.g. paid acquisition spend, an ad platform pause, a partner integration, or infra outside these three repos) occurred on or immediately before 2026-06-16.
+      why: All GitHub, PostHog, and Slack channels searched show no record of a cause, so the explanation likely lies outside this tenant's connected sources rather than being absent altogether.
+      [github.commits 0545e17f, slack.search_messages 39c57e0f]
+
+RISKS AND CAVEATS
+------------------------------------------------------------------------------
+  - Every explanatory source (GitHub commits/PRs/deployments for two repos, PostHog feature flags and annotations, Slack search and decisions) returned empty for the exact window of the drop. This pattern -- uniform silence across every connected system -- is at least as consistent with a connector or sync gap in this environment as with genuine inactivity, and cannot be distinguished from that here.
+  - The 'user signed up' event has no description or verified flag in the PostHog event catalog (unlike most other server-side events, which are marked verified:true), raising the possibility this event's instrumentation itself changed or is only partially reliable around the shift date.
+  - 4 claim(s) go beyond their evidence and are retained with reduced confidence rather than removed, because the rest of each one holds. What the check found:
+- executive_summary[1]: The searches only cover narrow keyword queries and limited date windows (e.g., marketing-site commits only checked 2026-06-10 to 06-20, Slack searches limited to specific terms lik
+- executive_summary[2]: Evidence only shows two empty queries (github commits, slack search) not PostHog, so 'every connected source' and the recommendation is a reasonable inference but overstates covera
+- findings[1].claims[0]: The evidence shows zero commits since 2026-06-10 (no end date specified) and zero deployments in an unspecified window, but nothing establishes the specific cutoff of 2026-06-25.
+- findings[1].claims[4]: The claim aggregates five zero-result searches accurately, though the 'signup' and 'onboarding' queries only covered partial June windows (6/14-6/20, 6/10-6/25) rather than all of
+
+DATA QUALITY
+------------------------------------------------------------------------------
+  - GitHub commit, PR, and deployment queries for acme/product and acme/marketing-site returned zero rows for the entire window surrounding the drop (2026-05-15 through 2026-06-25), which is unusual for active repositories and may indicate a connector gap rather than genuine inactivity.
+  - The 'user signed up' event lacks a description and verified flag, unlike other cataloged server-side events, so its instrumentation reliability could not be independently confirmed.
+  - 12 of the 14 cited observation(s) returned no results (github.commits, github.deployment_history, github.find_feature, github.recent_prs, posthog.annotations, posthog.feature_flags, slack.find_decision, slack.search_messages). Conclusions resting on them describe what was not found, which is not the same as what does not exist.
+
+SOURCES
+------------------------------------------------------------------------------
+  0545e17f  github.commits  eval://github__commits
+  a8857c7f  github.commits  eval://github__commits
+  14037068  github.deployment_history  eval://github__deployment_history
+  7150e133  github.find_feature  eval://github__find_feature
+  9c1f39f3  github.recent_prs  eval://github__recent_prs
+  2b3f4af9  posthog.annotations  eval://posthog__annotations
+  abc94eae  posthog.event_trend  eval://posthog__event_trend
+  3fd38237  posthog.feature_flags  eval://posthog__feature_flags
+  0f19078e  posthog.list_events  eval://posthog__list_events
+  5f0ce315  slack.find_decision  eval://slack__find_decision
+  39c57e0f  slack.search_messages  eval://slack__search_messages
+  a1778582  slack.search_messages  eval://slack__search_messages
+  8d8df5ac  slack.search_messages  eval://slack__search_messages
+  f67a7149  slack.search_messages  eval://slack__search_messages
+
+phase breakdown (103s wall, 103s measured)
+  phase        calls  seconds  share    mean  tokens
+  survey           1      0.0    0%     0.0  in 0 out 0
+  recall           1      0.0    0%     0.0  in 0 out 0
+  loop_model       8     50.0   48%     6.2  in 16 out 3,664 cached 142,643
+  loop_tools       7      0.2    0%     0.0  in 0 out 0
+  draft            1     44.6   43%    44.6  in 25,764 out 3,784
+  gate             1      0.0    0%     0.0  in 0 out 0
+  verify           1      8.6    8%     8.6  in 20,354 out 1,118
+  sufficiency      1      0.0    0%     0.0  in 0 out 0
+  cache hit rate: 76%
+
+WHAT THE DATA ACTUALLY CONTAINED
+------------------------------------------------------------------------------
+  correct verdict: NO CAUSE -- the evidence cannot establish one
+  planted cause: Signups did step down in mid-June and the only candidate is a copy deploy merged on 2026-06-16. Nothing connects them: no comparable unaffected series, no experiment, no error report, and the deploy did not touch the signup path. The movement is established; its cause is not.
+  decoys placed to mislead: caused by the deploy, the deploy caused, driven by the deploy
+  signals a correct answer names: any of [2026-06-16, 2026-06-17, 16 June, 17 June, June 16, June 17], any of [copy, deploy, 812]

@@ -1,0 +1,86 @@
+Investigating: Did our signups fall from last month?
+Dataset: partial_month_false_premise (synthetic, labelled)  model: claude-sonnet-5  effort: low
+This takes a few minutes. Progress:
+  gathered 21 observations in 92s; grounding the report
+  verifying each claim against its own evidence
+  sufficiency gate: skipped, this report asserts no cause (0.0s)
+
+==============================================================================
+Q: Did our signups fall from last month?
+==============================================================================
+
+Confidence: low
+Took 92s over 8 steps, 25,130 tokens, 21 observations gathered, 10 cited
+
+ANSWER
+------------------------------------------------------------------------------
+  Cannot be confirmed: the data needed to compare recent signups to last month is missing for most of the relevant window — all signup and session sources stop returning rows after 2026-08-12, so neither the rest of August nor September can be measured.  [posthog.event_trend 031f54a8, ga4.get_sessions d624355c, posthog.event_trend f3a69518]
+  In the days that do have data (August 1-12), the daily signup rate was flat at roughly 150-163 per day, showing no sign of decline within that partial window.  [posthog.event_trend 031f54a8]
+
+FINDINGS
+------------------------------------------------------------------------------
+  Data coverage ends August 12  (medium)
+    - Posthog signup, pageview, and trial event data, and GA4 session data, all stop returning rows after 2026-08-12, so neither August (fully) nor September can be compared to July.  [posthog.event_trend 031f54a8, posthog.event_trend ae570c02, ga4.get_sessions d624355c, posthog.event_trend a79c6f00, posthog.event_trend f3a69518]
+    - Within the days that do have data (2026-08-01 through 2026-08-12), the daily signup rate was stable at roughly 150-163 per day, showing no decline within that window.  [posthog.event_trend 031f54a8]
+    - A GA4 comparison of 2026-08-01–21 against 2026-07-01–21 shows sessions down 44% and conversions down 44%, but the GA4 series for that same August window has no rows past August 12, so most of the 'current' period is missing data rather than a real decline.  [ga4.compare_periods e58f6ec6, ga4.get_sessions d624355c]
+    - A team member raised the same concern in Slack on 2026-08-11, asking whether signups looked down for the month, which is consistent with the same partial-month data being misread as a real drop.  [slack.search_messages 57c26cac]
+
+CHARTS
+------------------------------------------------------------------------------
+  user signed up over time
+  value
+    value              |▇▃▅█▂▁▃▇▆▃▃▂|  150 → 163
+                        2026-08-01 … 2026-08-12
+
+  user signed up over time
+  value
+    value              |▅█████▁|  459 → 1,110
+                        2026-06-29 … 2026-08-10
+
+
+RISKS AND CAVEATS
+------------------------------------------------------------------------------
+  - All available signup and session data for the period in question ends on 2026-08-12; no tool call returned any rows for the rest of August or for September. This is very likely a data pipeline or connector gap rather than an actual absence of activity, and it makes any month-over-month comparison for August or September unreliable.
+  - No GitHub commits were found for acme/product across the whole window checked (July 1 through late August), which is itself surprising for an active product repo and suggests the GitHub connector may not be returning full history either.
+  - 2 claim(s) go beyond their evidence and are retained with reduced confidence rather than removed, because the rest of each one holds. What the check found:
+- findings[0].claims[0]: Signup and GA4 data indeed cut off at 2026-08-12, but the pageview and trial_started queries returned zero rows for their entire range starting well before that date, so they don't
+- findings[0].claims[3]: The Slack message confirms the date and that a team member flagged signups looking down, but nothing in the evidence supports the causal interpretation that this reflects partial-m
+
+DATA QUALITY
+------------------------------------------------------------------------------
+  - Posthog 'user signed up' and '$pageview' events and GA4 sessions all have no observations after 2026-08-12, despite the question asking about a comparison that requires August and September data.
+  - The 'trial_started' event returned zero rows for the entire 2026-07-01 to 2026-09-21 window, suggesting this event may not be tracked in this project or its data has not synced.
+  - 6 of the 10 cited observation(s) returned no results (ga4.get_sessions, github.commits, posthog.event_trend). Conclusions resting on them describe what was not found, which is not the same as what does not exist.
+
+SOURCES
+------------------------------------------------------------------------------
+  e58f6ec6  ga4.compare_periods  eval://ga4__compare_periods
+  d624355c  ga4.get_sessions  eval://ga4__get_sessions
+  72344e52  github.commits  eval://github__commits
+  72e7b557  github.commits  eval://github__commits
+  09c9c9e8  github.commits  eval://github__commits
+  031f54a8  posthog.event_trend  eval://posthog__event_trend
+  ae570c02  posthog.event_trend  eval://posthog__event_trend
+  a79c6f00  posthog.event_trend  eval://posthog__event_trend
+  f3a69518  posthog.event_trend  eval://posthog__event_trend
+  57c26cac  slack.search_messages  eval://slack__search_messages
+
+phase breakdown (99s wall, 99s measured)
+  phase        calls  seconds  share    mean  tokens
+  survey           1      0.0    0%     0.0  in 0 out 0
+  recall           1      0.0    0%     0.0  in 0 out 0
+  loop_model       8     64.7   65%     8.1  in 16 out 4,538 cached 130,820
+  loop_tools       7      0.2    0%     0.0  in 0 out 0
+  draft            1     26.8   27%    26.8  in 18,721 out 1,855
+  gate             1      0.0    0%     0.0  in 0 out 0
+  verify           1      7.2    7%     7.2  in 11,395 out 736
+  sufficiency      1      0.0    0%     0.0  in 0 out 0
+  cache hit rate: 81%
+
+WHAT THE DATA ACTUALLY CONTAINED
+------------------------------------------------------------------------------
+  correct verdict: REFUSE THE PREMISE -- the asserted movement did not happen
+  planted cause: Signups did not fall. August's total is lower only because the month is 12 days old: 157.0 signups/day across 1-12 August against 156.4/day across all of July. Comparing a partial month's total to a complete one is the entire apparent decline.
+  decoys placed to mislead: deploy, pricing page, campaign, onboarding
+  signals a correct answer names: none
+  the summary must refute with: any of [did not fall, have not fallen, has not fallen, not fallen, no fall, did not decline, no decline, did not drop, have not dropped, no, signups, signups have held, flat], any of [partial, incomplete, 12 days, twelve days, run rate, run-rate, per day, daily average, not comparable, different lengths, same length]

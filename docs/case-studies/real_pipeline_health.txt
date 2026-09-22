@@ -1,0 +1,87 @@
+Investigating REAL data for tenant █████████: how much open pipeline do we have right now, broken down by stage and value, and how much of it should i actually believe?
+2026-09-22 19:48:17 [warning  ] mcp.nothing_admissible         label=posthog reason='the server was queried and offered no tool Cortex can admit; every tool must declare readOnlyHint: true'
+Read-only: no write capability exists in the tool registry.
+Capabilities available to █████████: github, hubspot, posthog, slack
+  [  0.0s]          checking what data exists
+  [  1.0s]          found github__list_repositories
+  [  1.0s]          found posthog__list_events
+  [  1.0s]          found posthog__list_projects
+  [  1.0s]          checking memory for prior context
+  [  5.4s] step 1   deciding what to look at
+  [ 11.1s] step 1   calling hubspot__pipeline
+  [ 11.1s] step 1   calling hubspot__closed_won
+  [ 11.1s] step 1   calling hubspot__search
+  [ 11.1s] step 1   calling hubspot__search
+  [ 13.1s] step 1   got hubspot__pipeline (4 observation(s) so far)
+  [ 13.1s] step 1   got hubspot__closed_won (5 observation(s) so far)
+  [ 13.1s] step 1   got hubspot__search (6 observation(s) so far)
+  [ 13.1s] step 1   got hubspot__search (7 observation(s) so far)
+  [ 13.1s] step 2   deciding what to look at
+  [ 17.3s] step 2   got read hubspot.pipeline in full (69 rows) (7 observation(s) so far)
+  [ 17.3s] step 2   got read hubspot.search in full (65 rows) (7 observation(s) so far)
+  [ 17.3s] step 3   deciding what to look at
+  [ 74.8s]          drafting the report from 7 observation(s)
+  [103.1s]          checking every citation resolves
+  [103.1s]          re-reading each claim against its own evidence
+  sufficiency gate: skipped, this report asserts no cause (0.0s)
+  [114.2s]          writing the report
+
+==============================================================================
+Q: How much open pipeline do we have right now, broken down by stage and value, and how much of it should I actually believe?
+==============================================================================
+
+Confidence: low
+Took 103s over 3 steps, 112,089 tokens, 7 observations gathered, 4 cited
+
+ANSWER
+------------------------------------------------------------------------------
+  Total open pipeline is $█,███,███ across ██ deals as of 2026-09-22.  [hubspot.pipeline 21e7ccb4]
+  Of that, roughly $█,███,███ (█ deals) sit at close dates that have already passed (2026-06-30) and are disproportionately linked to a batch of 2026-01-05-created records with no source data, so the trustworthy, current open pipeline is closer to $█.█M.  [hubspot.pipeline 21e7ccb4, hubspot.search b32c8c64]
+
+FINDINGS
+------------------------------------------------------------------------------
+  Pipeline by stage  (high)
+    - Open pipeline totals $█,███,███ across ██ deals as of 2026-09-22.  [hubspot.pipeline 21e7ccb4]
+  Recent win/loss context for calibration  (high)
+    - Closed-won deals over the trailing ██ days (2026-06-22 to 2026-09-22) total $███,███ across █ deals.  [hubspot.closed_won 0cfa59cd]
+    - Closed-lost deals over the same ██-day window total $█,███,███ across ██ deals, more than four times the won value.  [hubspot.search 16a5dc13]
+
+RISKS AND CAVEATS
+------------------------------------------------------------------------------
+  - The stale-deal adjustment relies on close_date and creation-date patterns as a proxy for data quality; it is not a confirmed CRM hygiene audit, so the $█.█M 'trustworthy' figure is an estimate, not a verified subset.
+  - A ██:█ lost-to-won ratio over the trailing quarter suggests historical win rates on open pipeline may be lower than the deals' recorded probabilities imply, which is not reflected in the raw pipeline total.
+  - █ claim(s) were removed because an independent check found the cited evidence did not support them. Treat the remaining conclusions with corresponding caution.
+  - █ claim(s) go beyond their evidence and are retained with reduced confidence rather than removed, because the rest of each one holds. What the check found:
+- executive_summary[1]: The evidence shows █ deals totaling $█,███,███ with past close dates, not █ deals as claimed, though the $█.██M figure and resulting ~$█.█M remainder are supported.
+- findings[2].claims[1]: The $█,███,███/██ deals figures match the evidence exactly, but the comparison to 'won value' being over four times relies on data not shown in this evidence item.
+  - The question also asked about What is the breakdown of open pipeline value/count by each individual stage (e.g., prospecting, qualification, proposal, negotiation)? — this report does not address that. What it does say is grounded; it is not the whole answer.
+
+DATA QUALITY
+------------------------------------------------------------------------------
+  - █ of ██ open deals (██% of count, ██% of value) have a close date already in the past, and most of those lack source attribution — likely an unmaintained cohort from an early bulk import.
+  - The github commits sync last succeeded ██ days ago. Stored history for it is that old, and a recent change may not appear.
+  - The github deployments sync last succeeded ██ days ago. Stored history for it is that old, and a recent change may not appear.
+  - The github issues sync last succeeded ██ days ago. Stored history for it is that old, and a recent change may not appear.
+  - The github links sync last succeeded ██ days ago. Stored history for it is that old, and a recent change may not appear.
+  - The posthog annotations sync last succeeded ██ days ago. Stored history for it is that old, and a recent change may not appear.
+  - The posthog events sync last succeeded ██ days ago. Stored history for it is that old, and a recent change may not appear.
+
+SOURCES
+------------------------------------------------------------------------------
+  0cfa59cd  hubspot.closed_won  hubspot://crm/v3/objects/deals/search?closed_won=2026-06-22..2026-09-22
+  21e7ccb4  hubspot.pipeline  hubspot://crm/v3/objects/deals/search?open=true
+  b32c8c64  hubspot.search  hubspot://crm/v3/objects/deals/search?closedate[LT]=2026-09-22&hs_is_closed=false
+  16a5dc13  hubspot.search  hubspot://crm/v3/objects/deals/search?closedate=2026-06-22..2026-09-22&hs_is_closed_lost=true
+
+phase breakdown (114s wall, 112s measured)
+  phase        calls  seconds  share    mean  tokens
+  survey           1      1.0    1%     1.0  in 0 out 0
+  recall           1      4.4    4%     4.4  in 0 out 0
+  loop_model       3     67.4   59%    22.5  in 6 out 6,950 cached 24,432
+  loop_tools       2      2.1    2%     1.0  in 0 out 0
+  draft            2     28.3   25%    14.1  in 102,749 out 2,384
+  gate             1      0.0    0%     0.0  in 0 out 0
+  verify           1      8.8    8%     8.8  in 34,555 out 1,099
+  sufficiency      1      0.0    0%     0.0  in 0 out 0
+  unmeasured              2.3    2%
+  cache hit rate: 15%
