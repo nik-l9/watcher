@@ -143,7 +143,13 @@ class HubSpotTool(BaseTool):
                     },
                 },
                 handler=self.pipeline,
-                result_key="stages",
+                # "deals", not "stages". `pipeline` returns open deals; nothing in this module
+                # ever sets a "stages" key, so `is_empty` looked for a key that never existed
+                # and answered True for every result -- including one carrying 69 deals worth
+                # $2.4M. The analyst was then handed "THIS RESULT IS EMPTY. ... widen or remove
+                # one filter and look again" on top of a full pipeline, and the grounding gate
+                # counted it among the observations that "returned no results".
+                result_key="deals",
             ),
             Capability(
                 name="closed_won",
