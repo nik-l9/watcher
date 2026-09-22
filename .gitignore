@@ -26,3 +26,8 @@ graphify-out/
 # for another run, so they are written by default -- but they are outputs, and a baseline
 # worth keeping should be copied somewhere deliberate rather than committed by accident.
 eval-runs/
+
+# Rendered case-study videos. The .cast recordings beside them are the source and are
+# committed; these are regenerated from those in seconds by scripts/make_case_study_videos.sh
+# and cost nothing to rebuild, so ~20MB of them does not belong in history.
+docs/case-studies/video/
