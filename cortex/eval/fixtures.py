@@ -3421,6 +3421,16 @@ def forecast_ignores_the_decision(seed: int = 8) -> Scenario:
     assert sum(a for _, a, _ in open_deals) == 2_400_000
     assert sum(a for n, a, _ in open_deals if n in frozen) == 900_000
 
+    # Earlier quarters, at a win rate that makes the open pipeline unremarkable rather than
+    # remarkable in either direction.
+    closed_won = [
+        ("Initrode", 120_000, "2026-05-22"),
+        ("Vehement Capital", 95_000, "2026-04-14"),
+        ("Bluth Original", 80_000, "2026-06-05"),
+        ("Cogswell Cogs", 75_000, "2026-03-27"),
+        ("Spacely Sprockets", 60_000, "2026-05-08"),
+    ]
+
     decision = {
         "ts": "1788350400.000100",
         "timestamp": "2026-08-15T14:00:00+00:00",
@@ -3503,6 +3513,32 @@ def forecast_ignores_the_decision(seed: int = 8) -> Scenario:
                 ],
             },
             "slack__find_decision": {"topic": "forecast", "messages": [decision]},
+            # Closed history, so the portal is a coherent world rather than one with twelve
+            # open deals and no record of ever having closed anything.
+            #
+            # Planted after three runs failed here for a reason that was entirely the
+            # fixture's: the analyst searched closed-won and closed-lost, got zero rows from
+            # both, and reported -- reasonably -- that "no closes recorded at all in 2025-2026"
+            # looked like a broken sync rather than a true absence. The sufficiency gate then
+            # refused the forecast, correctly, because a definitive answer resting on a world
+            # that appears instrumented-wrong is not supportable. Nothing here bears on the
+            # question; it exists so that looking around does not turn up an apparent incident.
+            "hubspot__closed_won": {
+                "count": len(closed_won),
+                "deals": [
+                    {
+                        "id": str(79_000_000 + index),
+                        "name": name,
+                        "stage": "closedwon",
+                        "amount": amount,
+                        "close_date": f"{closed}T12:00:00Z",
+                        "pipeline": "default",
+                        "deal_type": "newbusiness",
+                    }
+                    for index, (name, amount, closed) in enumerate(closed_won)
+                ],
+                "total_amount": sum(amount for _, amount, _ in closed_won),
+            },
         },
         dated_records={
             # The same thread, reachable by search as well as by the decision finder.
