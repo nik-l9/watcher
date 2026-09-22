@@ -22,6 +22,13 @@ class Settings(BaseSettings):
 
     env: Literal["local", "test", "staging", "production"] = "local"
 
+    #: Lowest structlog level that prints. Defaults to `debug`, which is what every run has
+    #: always done and what makes `llm.cache` attributable to a call.
+    #:
+    #: Raising it exists for one case: a run somebody else will read, where a per-request
+    #: diagnostic interleaved with the report is noise the reader cannot tell from output.
+    log_level: Literal["debug", "info", "warning", "error"] = "debug"
+
     postgres_dsn: str = "postgresql+asyncpg://cortex:cortex@localhost:5433/cortex"
 
     falkordb_host: str = "localhost"

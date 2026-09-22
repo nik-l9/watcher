@@ -26,6 +26,7 @@ import dataclasses
 import sys
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,11 +39,12 @@ from cortex.agents.progress import Phase, ProgressEvent, TerminalProgress, emit
 from cortex.agents.provider import build_llm
 from cortex.agents.service import confidence_score, record_usage
 from cortex.agents.timing import GATE, SUFFICIENCY, VERIFY
+from cortex.config.logging import configure_logging
 from cortex.db.models import Investigation as InvestigationRow
 from cortex.db.models import InvestigationStatus, Report, Tenant
 from cortex.db.threads import ParentNotFound, ThreadTooDeep, check_parent
 from cortex.db.titles import title_for
-from cortex.eval.fixtures import SCENARIOS, Scenario, by_name
+from cortex.eval.fixtures import SCENARIOS, Scenario, by_name, describe_requirement
 from cortex.eval.runner import scenario_registry
 from cortex.memory.naming import graph_name_for_new_tenant
 from cortex.memory.recall import HybridRecall
@@ -457,21 +459,47 @@ async def _main(argv: list[str] | None = None) -> int:
     )
 
     if args.show_truth:
-        truth: Any = scenario.ground_truth
-        sys.stdout.write(
-            "\n".join(
-                [
-                    "WHAT THE DATA ACTUALLY CONTAINED",
-                    "-" * 78,
-                    f"  planted cause: {truth.cause}",
-                    f"  decoys placed to mislead: {', '.join(truth.decoys) or 'none'}",
-                    f"  signals a correct answer names: "
-                    f"{', '.join(truth.required_signals) or 'none'}",
-                    "",
-                ]
-            )
-        )
+        sys.stdout.write(_render_truth(scenario.ground_truth))
     return 0
+
+
+def _signals(requirements: Sequence[Any]) -> str:
+    """Requirements as one line, with any-of groups kept legible.
+
+    A requirement may be a tuple meaning "any of these will do", which `join` cannot take
+    at all -- and which, flattened, a reader would misread as several separate demands.
+    """
+    return ", ".join(describe_requirement(r) for r in requirements) or "none"
+
+
+def _render_truth(truth: Any) -> str:
+    """What the fixture planted, printed so a reader can mark the report themselves.
+
+    This exists to make a run checkable by someone who was not there: the report above
+    says one thing, this says what was actually in the data. That only works if it also
+    states *which kind* of correct answer was available. For the two hardest scenarios
+    the correct answer is not a cause at all -- it is "the data cannot say" or "the thing
+    you asked about did not happen" -- and a truth block that printed only `cause` made
+    those look like an analyst that had failed to find something.
+    """
+    lines = ["", "WHAT THE DATA ACTUALLY CONTAINED", "-" * 78]
+    if truth.is_false_premise:
+        lines.append(
+            "  correct verdict: REFUSE THE PREMISE -- the asserted movement did not happen"
+        )
+    elif truth.is_unanswerable:
+        lines.append("  correct verdict: NO CAUSE -- the evidence cannot establish one")
+    else:
+        lines.append("  correct verdict: NAME THE CAUSE")
+    lines.append(f"  planted cause: {truth.cause}")
+    lines.append(f"  decoys placed to mislead: {', '.join(truth.decoys) or 'none'}")
+    lines.append(f"  signals a correct answer names: {_signals(truth.required_signals)}")
+    if truth.refutation_signals:
+        # Checked against the executive summary specifically: a report that refutes the
+        # premise in its fourth bullet has already misinformed everyone who stopped early.
+        lines.append(f"  the summary must refute with: {_signals(truth.refutation_signals)}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 async def _ask_real(args: argparse.Namespace) -> int:
@@ -715,6 +743,7 @@ async def _ask_real(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     return asyncio.run(_main(argv))
 
 
