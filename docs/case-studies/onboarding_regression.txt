@@ -1,0 +1,120 @@
+Investigating: Why did signups fall in the week of 15 July 2026?
+Dataset: onboarding_regression (synthetic, labelled)  model: claude-sonnet-5  effort: low
+This takes a few minutes. Progress:
+  gathered 16 observations in 81s; grounding the report
+  verifying each claim against its own evidence
+  verifier removed 2 claim(s)
+  2 causal claim(s) re-derived from their evidence without the claim in view
+  sufficiency gate: the evidence supports a cause (5.7s)
+
+==============================================================================
+Q: Why did signups fall in the week of 15 July 2026?
+==============================================================================
+
+Confidence: low
+Took 81s over 4 steps, 25,503 tokens, 16 observations gathered, 8 cited
+
+ANSWER
+------------------------------------------------------------------------------
+  The most likely cause is PR #913 ('Rework mobile onboarding modal'), merged 2026-07-14 via commit 91c3e4a on acme/web, which shipped with a reviewer-flagged, unresolved bug making the continue button unreachable on small mobile viewports.  [github.pull_request_activity 3481736f, github.commits 6d6263f5]
+  An alternative explanation — a pricing page copy change merged 2026-07-12 — was ruled out because it predates the 2026-07-15 onset of the drop by two to three days with no corresponding movement in between.  [github.commits 6d6263f5, posthog.event_trend e60587a3]
+  No commits were found in acme/product for the period, ruling out a backend or application-side change as the cause.  [github.commits 78874537]
+  Recommended action is to ship the deferred sticky-footer fix or roll back commit 91c3e4a, and to add a device-segmented onboarding funnel to directly confirm where mobile users are dropping off.  [github.pull_request_activity 3481736f]
+
+FINDINGS
+------------------------------------------------------------------------------
+  Signups (conversions) fell 26.71% week-over-week  (high)
+    - PostHog 'onboarding completed' events show a stable daily baseline of roughly 82–87 per day from 1–14 July, stepping down to roughly 63–67 per day from 15 July onward, with the shift occurring exactly at 15 July.  [posthog.event_trend e60587a3]
+  The decline is concentrated on mobile  (medium)
+    - GA4 sessions by device show mobile falling from a stable ~1660–1690/day (8–14 July) to ~1349–1430/day (15–21 July), while desktop fell proportionally as well, from ~696–708/day to ~564–598/day, with mobile representing the larger absolute drop.  [ga4.get_sessions d8ef3717]
+  A mobile onboarding modal rework (PR #913, acme/web) was merged the day before the drop began, with a known unresolved mobile usability issue  (high)
+    - Pull request #913, 'Rework mobile onboarding modal', was merged into acme/web on 2026-07-14 via commit 91c3e4a.  [github.commits 6d6263f5, github.pull_request_activity 3481736f]
+    - A reviewer flagged before merge that on a 375px viewport with the keyboard open, the continue button sits below the fold and is unreachable on an iPhone SE, requesting a sticky footer fix; the author merged anyway to hit a launch date, explicitly deferring the sticky footer fix, and a second reviewer commented 'watch mobile signups' when approving the merge.  [github.pull_request_activity 3481736f]
+    - The onboarding-completion step-change began on 15 July, one day after the 14 July merge of PR #913.  [posthog.event_trend e60587a3, github.commits 6d6263f5]
+
+CHARTS
+------------------------------------------------------------------------------
+  onboarding completed over time
+  value
+    value              |▇██▇▇▇██▇▇█▇█▇▂▂▁▂▂▁▁|  63 → 87
+                       |           ^ ^       |
+      ^1 Update pricing page copy (#908) (2026-07-12)
+      ^2 Rework mobile onboarding modal (#913) (2026-07-14)
+      ^3 Bump tailwindcss from 4.1.2 to 4.1.3 (2026-07-14)
+                        2026-07-01 … 2026-07-21
+
+  sessions over time
+  sessions
+    sessions           |██▇▇▇██▁▂▂▂▁▃▂|  1,349 → 1,691
+                       |    ^ ^       |
+      ^1 Update pricing page copy (#908) (2026-07-12)
+      ^2 Rework mobile onboarding modal (#913) (2026-07-14)
+      ^3 Bump tailwindcss from 4.1.2 to 4.1.3 (2026-07-14)
+                        2026-07-08 … 2026-07-21
+
+
+HYPOTHESES TESTED
+------------------------------------------------------------------------------
+  [supported] The onboarding modal rework in PR #913 (merged 2026-07-14), which shipped with a known unresolved mobile viewport bug blocking the continue button, caused the drop in mobile signups beginning 2026-07-15.
+      The timing lines up exactly (merge 14 July, onset 15 July), the PR touches the onboarding flow specifically, and the pre-merge review explicitly identifies a mobile-only blocking bug that was knowingly shipped unfixed. Onboarding completions and mobile sessions/conversions all step down together at the same date.
+  [contradicted] The pricing page copy change (commit 77aa21b, merged 2026-07-12) in acme/web caused the drop in signups.
+      This commit merged 2026-07-12, two days before the observed onboarding step-change on 2026-07-15; if it were the cause, the drop should have started 12–13 July, but the daily series stays flat through 14 July.
+  [inconclusive] A dependabot dependency bump (tailwindcss 4.1.2→4.1.3, commit a41b8c9, merged 2026-07-14) caused the drop.
+      This commit merged the same day as PR #913, so timing alone cannot separate the two. However, a routine patch-level CSS framework bump is a much weaker candidate than a rework of the onboarding flow with a documented, reviewer-flagged mobile bug shipped intentionally unfixed. No direct evidence ties this bump to the onboarding funnel, so it is set aside rather than ruled out by a specific observation.
+  [supported] No deploys or changes occurred in acme/product that could explain the drop.
+      A commit search on acme/product for the window returned zero commits, ruling out a backend/application-side change as the cause.
+
+RECOMMENDATIONS
+------------------------------------------------------------------------------
+  P1 Ship the sticky footer fix for the onboarding modal (deferred from PR #913) as a priority hotfix, or roll back commit 91c3e4a on acme/web to the prior three-step modal.
+      why: The reviewer on PR #913 explicitly identified that the continue button is unreachable on a 375px viewport with the keyboard open, and the fix was knowingly deferred; this is the most direct, named, actionable cause consistent with the timing of the drop.
+      [github.pull_request_activity 3481736f, posthog.event_trend e60587a3]
+  P2 Instrument the onboarding funnel with a device-category breakdown to directly confirm the drop-off point is the continue button on small mobile viewports.
+      why: Current evidence ties timing and a known bug together but does not directly show users abandoning at the modal's continue button; a device-segmented funnel would close this gap.
+      [ga4.get_sessions d8ef3717]
+
+RISKS AND CAVEATS
+------------------------------------------------------------------------------
+  - No Slack discussion of the signup drop or the onboarding issue was found, despite searching for both 'signup' and 'signups drop' — this is either because no one raised it internally (consistent with the drop being unnoticed as of this investigation) or because Slack search here has limited coverage. This absence should not be read as reassurance that the issue is minor.
+  - PostHog event-level breakdowns by device (mobile vs desktop) for 'onboarding completed' or 'trial_started' specifically were not queried; the mobile-concentration finding rests on GA4 session/device data rather than a device breakdown of the onboarding funnel itself, so the causal link between the modal bug and the specific funnel step where users drop off is inferred, not directly observed.
+  - 2 claim(s) were removed because an independent check found the cited evidence did not support them. Treat the remaining conclusions with corresponding caution.
+  - 4 claim(s) go beyond their evidence and are retained with reduced confidence rather than removed, because the rest of each one holds. What the check found:
+- executive_summary[2]: asked as an open question, with this claim withheld, the same evidence does not establish a cause: Onboarding completion counts dropped from ~85/day to ~65/day starting 2026-07-15,
+- executive_summary[3]: The evidence shows zero commits in the specific window, supporting the first part, but the claim's broader causal conclusion ('ruling out a backend or application-side change') ove
+- executive_summary[4]: The evidence supports deferring a sticky-footer fix and monitoring mobile signups, but it never mentions a commit '91c3e4a' or any device-segmented onboarding funnel recommendation
+- findings[2].claims[1]: The evidence shows reviewer sbeck both flagged the issue and later commented 'watch mobile signups,' while the APPROVED review was submitted by the author dwhitfield himself, not a
+
+DATA QUALITY
+------------------------------------------------------------------------------
+  - GA4 compare_periods dimension breakdown by sessionDefaultChannelGroup returned empty rows even though totals-only comparison succeeded; channel-level attribution of the session decline could not be established and is not claimed here.
+  - 4 of the 8 cited observation(s) returned no results (ga4.compare_periods, github.commits, slack.search_messages). Conclusions resting on them describe what was not found, which is not the same as what does not exist.
+
+SOURCES
+------------------------------------------------------------------------------
+  9ac9a9e1  ga4.compare_periods  eval://ga4__compare_periods
+  d8ef3717  ga4.get_sessions  eval://ga4__get_sessions
+  78874537  github.commits  eval://github__commits
+  6d6263f5  github.commits  eval://github__commits
+  3481736f  github.pull_request_activity  eval://github__pull_request_activity
+  e60587a3  posthog.event_trend  eval://posthog__event_trend
+  c3f10918  slack.search_messages  eval://slack__search_messages
+  61c594d1  slack.search_messages  eval://slack__search_messages
+
+phase breakdown (104s wall, 104s measured)
+  phase        calls  seconds  share    mean  tokens
+  survey           1      0.0    0%     0.0  in 0 out 0
+  recall           1      0.0    0%     0.0  in 0 out 0
+  loop_model       4     41.8   40%    10.4  in 8 out 3,546 cached 49,314
+  loop_tools       3      0.1    0%     0.0  in 0 out 0
+  draft            1     39.4   38%    39.4  in 18,284 out 3,665
+  gate             1      0.0    0%     0.0  in 0 out 0
+  verify           1     16.8   16%    16.8  in 27,103 out 1,983
+  sufficiency      1      5.7    5%     5.7  in 5,252 out 306
+  cache hit rate: 49%
+
+WHAT THE DATA ACTUALLY CONTAINED
+------------------------------------------------------------------------------
+  correct verdict: NAME THE CAUSE
+  planted cause: The onboarding modal shipped in deploy 91c3e4a regressed mobile conversion from 4.2% to 2.9%.
+  decoys placed to mislead: pricing page, campaign, seasonality
+  signals a correct answer names: any of [91c3e4a, 913], mobile
