@@ -53,13 +53,15 @@ _VALID_ARGS: dict[str, dict[str, object]] = {
     "github__pull_request_activity": {"repo": "acme/web", "number": 913},
     "github__issues": {"repo": "acme/web", "since": "2026-07-14"},
     "hubspot__contacts": {"start_date": "2026-07-15", "end_date": "2026-07-21"},
+    "hubspot__closed_won": {"start_date": "2026-04-01", "end_date": "2026-06-30"},
+    "hubspot__pipeline": {},
+    "slack__search_messages": {"query": "onboarding"},
     "posthog__event_trend": {
         "event": "user signed up",
         "start_date": "2026-06-01",
         "end_date": "2026-08-12",
     },
     "slack__find_decision": {"topic": "onboarding"},
-    "slack__search_messages": {"query": "onboarding"},
 }
 
 

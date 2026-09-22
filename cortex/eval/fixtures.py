@@ -3172,6 +3172,403 @@ def campaign_traffic_drop_undecidable(seed: int = 2) -> Scenario:
     )
 
 
+def won_accounts_not_activated(seed: int = 7) -> Scenario:
+    """A state question whose answer exists in no single tool.
+
+    **Why this scenario exists.** Every other scenario in this suite asks why something
+    *changed*, and the analyst's system prompt teaches a method for exactly that shape. Six
+    live runs against a real CRM were asked *state* questions instead -- how much pipeline,
+    what is our win rate, which deals are stale -- and five of the six answered from HubSpot
+    alone, never touching PostHog, GitHub or Slack. That is not the model being lazy: no
+    method it was given applies, so it falls back to retrieval from the one obvious source.
+
+    Nothing in the suite could detect that, because a suite made entirely of change
+    questions shares the blind spot it would need to measure.
+
+    So this question is answerable **only** by joining two connectors. HubSpot knows which
+    accounts were won. PostHog knows which organisations generate events. Neither knows
+    whether the accounts that were won are the organisations that show up, and the honest
+    answer -- six of the nine won accounts have produced no product event at all since
+    closing -- is invisible from either side.
+
+    The decoys are built so that each single-source view looks *fine*:
+
+    - HubSpot alone: nine deals closed won for $1.23M, a good quarter.
+    - PostHog alone: total events flat and healthy across the window, no incident.
+
+    An analyst that stops at one tool does not get a wrong number. It gets a right number
+    and misses the finding, which is the failure mode this whole project is about.
+    """
+    rng = random.Random(seed)
+    start = date(2026, 7, 1)
+
+    # The nine accounts closed in the prior quarter. Three of them show up in the product;
+    # six never do. Invented names -- a fixture that used real customers would put them in
+    # the repository forever.
+    won = [
+        ("Northwind Traders", 210_000, "2026-06-28"),
+        ("Globex", 185_000, "2026-06-30"),
+        ("Initech", 160_000, "2026-05-19"),
+        ("Umbrella Industries", 145_000, "2026-06-11"),
+        ("Hooli", 140_000, "2026-04-27"),
+        ("Soylent Corp", 125_000, "2026-06-30"),
+        ("Vandelay Industries", 110_000, "2026-05-06"),
+        ("Wonka Industries", 95_000, "2026-06-02"),
+        ("Cyberdyne Systems", 60_000, "2026-06-30"),
+    ]
+    activated = {"Globex", "Hooli", "Wonka Industries"}
+
+    return Scenario(
+        name="won_accounts_not_activated",
+        question="Are the accounts we closed last quarter actually using the product?",
+        difficulty=Difficulty.CONFOUNDED,
+        ground_truth=GroundTruth(
+            cause=(
+                "Nine accounts closed won last quarter. Only three of them -- Globex, Hooli "
+                "and Wonka Industries -- have produced a single product event since. The "
+                "other six, carrying $810,000 of the $1,230,000 closed, have never appeared "
+                "in the product at all. Total event volume is flat and healthy, which is why "
+                "neither source shows this on its own."
+            ),
+            required_signals=(
+                # The gap, however it is counted. An analyst reporting "only three of nine
+                # are active" has found exactly what one reporting "six have never used it"
+                # found, and demanding one phrasing would fail the other.
+                ("6 of", "six of", "6 of the 9", "six of the nine", "3 of", "three of"),
+                # Named, so a report cannot pass by asserting a gap it never located.
+                ("Northwind", "Initech", "Umbrella", "Soylent", "Vandelay", "Cyberdyne"),
+            ),
+            # Each is a true statement about one source and a wrong answer to the question.
+            decoys=(
+                "usage is healthy",
+                "all accounts are active",
+                "every account is using",
+                "no activation problem",
+            ),
+            # Both, and that is the entire point of the scenario. `connected_tools` is
+            # inferred from this, so the tenant gets exactly the two connectors needed.
+            required_capabilities=("hubspot__closed_won", "posthog__event_trend"),
+        ),
+        responses={
+            "hubspot__closed_won": {
+                "count": len(won),
+                "deals": [
+                    {
+                        "id": str(70_000_000 + index),
+                        "name": name,
+                        "stage": "closedwon",
+                        "amount": amount,
+                        "close_date": f"{closed}T12:00:00Z",
+                        "pipeline": "default",
+                        "deal_type": "newbusiness",
+                    }
+                    for index, (name, amount, closed) in enumerate(won)
+                ],
+                "total_amount": sum(amount for _, amount, _ in won),
+            },
+        },
+        subject_responses={
+            # Keyed by event, so asking for the breakdown returns the per-organisation view
+            # and asking for anything else does not. `segment`/`value` is the shape the real
+            # connector returns for a breakdown query -- see `posthog.event_trend`.
+            "posthog__event_trend": {
+                "workspace opened": {
+                    "event": "workspace opened",
+                    "measure": "count",
+                    "interval": "day",
+                    "breakdown_property": "organization",
+                    "row_count": len(activated),
+                    "series": [
+                        {"segment": name, "value": 400 + rng.randrange(0, 600)}
+                        for name, _, _ in won
+                        if name in activated
+                    ],
+                    "total": 2_100,
+                },
+            },
+        },
+        # Distractors. The tenant has four connectors, as the live one does, and two of them
+        # hold nothing that bears on the question.
+        #
+        # **Why they are here.** Built with only the two connectors it needs, this scenario was
+        # passed by calling everything available -- which is not the behaviour it exists to
+        # measure, and not the situation that produced the failure. The live investigations had
+        # four connectors and three went untouched. A fixture that makes the right pair the only
+        # pair is testing retrieval, not judgement.
+        #
+        # Deliberately plausible and deliberately silent on activation: GitHub shows a team
+        # shipping normally, Slack shows people talking about renewals and pricing. Neither
+        # contains any hint of which accounts are or are not using the product, so an analyst
+        # that stops in either has nothing, and one that reasons from them is reasoning from
+        # noise.
+        dated_records={
+            "github__commits": DatedRecords(
+                key="commits",
+                date_field="date",
+                subject="acme/web",
+                subject_param="repo",
+                # No `repo` here. Putting it in the envelope made every response claim to be
+                # about acme/web whatever repository was asked for -- the disjoint violation
+                # `test_a_different_subject_gives_a_different_answer` exists to catch, and it
+                # caught it. The projection echoes the requested subject on its own.
+                envelope={"path": None},
+                records=tuple(
+                    {
+                        "sha": f"c{index:06x}",
+                        "date": (start + timedelta(days=index * 9)).isoformat(),
+                        "message": message,
+                        "author": "a.developer",
+                    }
+                    for index, message in enumerate(
+                        [
+                            "Bump dependency versions",
+                            "Fix flaky test in the billing suite",
+                            "Add an index to the sessions table",
+                            "Tidy up the settings page layout",
+                            "Upgrade the logging library",
+                        ]
+                    )
+                ),
+            ),
+            "slack__search_messages": DatedRecords(
+                key="messages",
+                date_field="timestamp",
+                records=tuple(
+                    {
+                        "timestamp": (start + timedelta(days=day)).isoformat(),
+                        "text": text,
+                        "user": "U0GTM0001",
+                        "channel_name": "gtm",
+                        "author_kind": "person",
+                    }
+                    for day, text in [
+                        (3, "renewal paperwork for the Q3 cohort is with legal"),
+                        (12, "anyone got the latest pricing one-pager?"),
+                        (28, "moving the pipeline review to Thursdays"),
+                        (41, "reminder: log your calls before month end"),
+                    ]
+                ),
+            ),
+        },
+        daily_truth={
+            # The decoy: overall product usage is flat and unremarkable across the window, so
+            # a PostHog-only reading finds nothing wrong and stops.
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="$pageview",
+                    days=tuple(
+                        (
+                            start + timedelta(days=index),
+                            round(1_450 * (1 + rng.uniform(-0.06, 0.06))),
+                        )
+                        for index in range(80)
+                    ),
+                ),
+            )
+        },
+    )
+
+
+#: Deal-stage win probabilities, as a CRM actually carries them.
+_STAGE_PROBABILITY = {
+    "qualifiedtobuy": 0.4,
+    "presentationscheduled": 0.6,
+    "contractsent": 0.8,
+}
+
+
+def forecast_ignores_the_decision(seed: int = 8) -> Scenario:
+    """A CRM question whose answer is in Slack, and nothing in the question says so.
+
+    **What this measures that `won_accounts_not_activated` does not.** That scenario also
+    needs two connectors, but the question hands over the second one: *"are the accounts we
+    closed actually using the product"* points at product analytics in its own wording, and
+    both arms of a paired measurement found it. It tests whether the analyst *can* join two
+    sources. It does not test whether it *thinks to look*.
+
+    This one asks a pipeline question. Every word of it belongs to the CRM. The CRM answers
+    it completely and confidently -- twelve open deals, $2.4M, close dates inside the
+    quarter -- and that answer is wrong by $900,000, because three of those accounts froze
+    procurement and the only record of it is a Slack thread. No HubSpot field carries it.
+
+    So an analyst that opens the CRM and stops gets a clean, well-cited, plausible number,
+    and `accuracy` catches it. That is the shape of the failure observed live: six real
+    investigations, five of them answered out of a single connector while three others sat
+    connected and unopened.
+
+    The Slack route is deliberately reachable two ways -- `find_decision` and
+    `search_messages` both return the thread -- because requiring one endpoint would score
+    the route rather than the result.
+    """
+    rng = random.Random(seed)
+    start = date(2026, 7, 1)
+
+    frozen = {"Stark Industries", "Tyrell Corp", "Massive Dynamic"}
+    open_deals = [
+        ("Stark Industries", 400_000, "presentationscheduled"),
+        ("Tyrell Corp", 300_000, "contractsent"),
+        ("Massive Dynamic", 200_000, "presentationscheduled"),
+        ("Gringotts Bank", 260_000, "contractsent"),
+        ("Duff Brewing", 240_000, "presentationscheduled"),
+        ("Pied Piper", 210_000, "qualifiedtobuy"),
+        ("Bluth Company", 180_000, "presentationscheduled"),
+        ("Prestige Worldwide", 165_000, "qualifiedtobuy"),
+        ("Dunder Mifflin", 150_000, "contractsent"),
+        ("Sterling Cooper", 130_000, "qualifiedtobuy"),
+        ("Los Pollos Hermanos", 90_000, "presentationscheduled"),
+        ("Paper Street Soap", 75_000, "qualifiedtobuy"),
+    ]
+    assert sum(a for _, a, _ in open_deals) == 2_400_000
+    assert sum(a for n, a, _ in open_deals if n in frozen) == 900_000
+
+    decision = {
+        "ts": "1788350400.000100",
+        "timestamp": "2026-08-15T14:00:00+00:00",
+        "user": "U0VP0SALES",
+        # Worded to be findable by the terms an analyst actually reaches for -- pipeline,
+        # forecast, quarter, close, commit, deal -- because `_matches_search` requires *every*
+        # query term to appear, as a real search connector does. Planted with a narrower
+        # vocabulary, this scenario measured whether the analyst guessed the fixture's wording:
+        # a run searching "Q3 pipeline forecast" got zero rows and missed the answer, while one
+        # searching "forecast commit" found it. That is search luck, and this scenario is about
+        # whether the analyst thinks to open Slack at all.
+        "text": (
+            "Q3 pipeline forecast, commit review: Stark Industries, Tyrell Corp and Massive "
+            "Dynamic have all frozen procurement until their new fiscal year. None of those "
+            "three deals will close this quarter -- taking them out of the forecast now."
+        ),
+        "channel_name": "revenue",
+        "decision_signals": ["confirmed", "please take them out"],
+    }
+
+    return Scenario(
+        name="forecast_ignores_the_decision",
+        question="How much of our open pipeline is realistically going to close this quarter?",
+        difficulty=Difficulty.CONFOUNDED,
+        ground_truth=GroundTruth(
+            cause=(
+                "Twelve deals are open for the quarter totalling $2,400,000, but three of them "
+                "-- Stark Industries, Tyrell Corp and Massive Dynamic, $900,000 between them "
+                "-- were pulled from the commit on 2026-08-15 because those accounts froze "
+                "procurement until their next fiscal year. The realistic figure is $1,500,000. "
+                "No CRM field records the freeze; the only record is a Slack thread."
+            ),
+            required_signals=(
+                # The adjustment, by either figure. An analyst reporting "$1.5M" has found the
+                # same thing as one reporting "exclude $900K", and demanding one phrasing would
+                # fail the other.
+                ("1,500,000", "1.5M", "1.5 million", "900,000", "900K", "0.9M"),
+                # Why, which is the part only Slack can supply.
+                ("procurement", "frozen", "freeze", "commit", "fiscal year"),
+            ),
+            # Each is the CRM answer stated as the answer. The raw total is not a decoy on its
+            # own -- a correct report quotes it before adjusting it -- so these are phrasings
+            # that only appear when the adjustment was never made.
+            decoys=(
+                "all twelve deals",
+                "all 12 deals",
+                "entire pipeline will close",
+                "full $2,400,000 is expected",
+            ),
+            # Any-of on the Slack side: both endpoints return the thread, and requiring one
+            # would score conformity to a route rather than reaching the fact.
+            required_capabilities=(
+                "hubspot__pipeline",
+                ("slack__find_decision", "slack__search_messages"),
+            ),
+        ),
+        responses={
+            "hubspot__pipeline": {
+                "pipeline_id": "default",
+                "total_matching": len(open_deals),
+                "count": len(open_deals),
+                "total_amount": sum(amount for _, amount, _ in open_deals),
+                "deals": [
+                    {
+                        "id": str(80_000_000 + index),
+                        "name": name,
+                        "stage": stage,
+                        "amount": amount,
+                        "close_date": (start + timedelta(days=45 + index * 3)).isoformat()
+                        + "T12:00:00Z",
+                        "pipeline": "default",
+                        # Varied by stage. A flat 0.6 on every deal is not what a CRM looks
+                        # like, and two runs spotted it and made it the story -- correctly,
+                        # since "every probability is identical regardless of stage" is a real
+                        # data-quality finding. It was a fixture artifact, and a planted false
+                        # lead more salient than the planted answer.
+                        "probability": _STAGE_PROBABILITY[stage],
+                    }
+                    for index, (name, amount, stage) in enumerate(open_deals)
+                ],
+            },
+            "slack__find_decision": {"topic": "forecast", "messages": [decision]},
+        },
+        dated_records={
+            # The same thread, reachable by search as well as by the decision finder.
+            "slack__search_messages": DatedRecords(
+                key="messages",
+                date_field="timestamp",
+                records=(
+                    decision,
+                    {
+                        "ts": "1787832000.000200",
+                        "timestamp": "2026-07-20T09:30:00+00:00",
+                        "user": "U0GTM0002",
+                        "text": "reminder to keep close dates current before the forecast call",
+                        "channel_name": "revenue",
+                        "decision_signals": [],
+                    },
+                ),
+            ),
+            # Distractors, as in `won_accounts_not_activated`: a team shipping normally, with
+            # nothing to say about procurement or forecasting.
+            "github__commits": DatedRecords(
+                key="commits",
+                date_field="date",
+                subject="acme/web",
+                subject_param="repo",
+                envelope={"path": None},
+                records=tuple(
+                    {
+                        "sha": f"d{index:06x}",
+                        "date": (start + timedelta(days=index * 11)).isoformat(),
+                        "message": message,
+                        "author": "a.developer",
+                    }
+                    for index, message in enumerate(
+                        [
+                            "Raise the default page size",
+                            "Cache the account settings lookup",
+                            "Drop an unused column",
+                            "Refresh the marketing footer",
+                        ]
+                    )
+                ),
+            ),
+        },
+        daily_truth={
+            # Product usage is flat and healthy and has nothing to do with the question.
+            #
+            # Deliberately *not* `$pageview`. That name is already in `DISCOVERY_DEFAULTS`, and
+            # `_event_listing` only awards the evening `live=True` slot to events it has to add
+            # to the catalogue -- so a scenario planting a default name gets a decoy-range
+            # timestamp and can look staler than its own decoys. A latent trap for any scenario
+            # planting a standard event, avoided here rather than fixed, because fixing it moves
+            # the catalogue every other scenario is measured against.
+            "posthog__event_trend": (
+                DailyTruth(
+                    event="workspace opened",
+                    days=tuple(
+                        (start + timedelta(days=index), round(980 * (1 + rng.uniform(-0.05, 0.05))))
+                        for index in range(90)
+                    ),
+                ),
+            )
+        },
+    )
+
+
 SCENARIOS: tuple[Scenario, ...] = (
     onboarding_regression(),
     campaign_traffic_drop(),
@@ -3186,6 +3583,13 @@ SCENARIOS: tuple[Scenario, ...] = (
     # stricter gate always looks like an improvement.
     onboarding_regression_undecidable(),
     campaign_traffic_drop_undecidable(),
+    # The first state question in the suite. Every scenario above it asks why something
+    # changed; this one asks what is true now, and can only be answered across two
+    # connectors. See its docstring.
+    won_accounts_not_activated(),
+    # The second state question, and the harder one: its answer sits in a connector the
+    # question gives no reason to open. See its docstring.
+    forecast_ignores_the_decision(),
 )
 
 
