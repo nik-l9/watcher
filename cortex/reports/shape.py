@@ -96,6 +96,64 @@ _LOOKUP = re.compile(
 )
 
 
+#: Marks that a question needs work done before an answer exists, whatever it opens with.
+#:
+#: **The defect this closes.** A lookup opener was sufficient on its own, so *"which stage are
+#: we losing the most deals at"* classified FACTUAL -- and `GUIDANCE[Shape.FACTUAL]` told the
+#: analyst the reader "wants the answer, not a case for it" and to leave hypotheses empty.
+#: Measured across six live investigations against a real CRM, five of the six questions
+#: classified FACTUAL and five of the six answered out of a single connector while three others
+#: sat unused. The analyst was not being lazy; it was doing what it was told.
+#:
+#: The distinction is not the opening word, it is whether one retrieval can answer. A lookup has
+#: an answer that can be read off a single result -- "how many deals closed last month", "which
+#: deals have no activity since June". These four markers each mean it cannot:
+#:
+#:   - **ranking** -- a superlative requires comparing across a dimension before anything is true;
+#:   - **decomposition** -- "by stage", "by source": the aggregate is not the answer;
+#:   - **verification** -- "actually", "really", "should I trust": the question doubts its own
+#:     premise and wants it checked, which takes a second source;
+#:   - **comparison** -- "versus", "compared to": two things must be measured, not one.
+#:
+#: Deliberately narrow. Every marker here is a word that *asks for work*, not a word that happens
+#: to appear in analytical questions, because the cost of over-matching is a padded answer to a
+#: simple question -- the exact failure this module was written to stop.
+_ANALYTICAL = re.compile(
+    r"\b("
+    # Ranking.
+    r"most|least|best|worst|top|bottom|highest|lowest|biggest|largest|smallest|"
+    r"fastest|slowest|strongest|weakest|"
+    # Decomposition.
+    r"by stage|by source|by segment|by channel|by owner|by rep|by region|by plan|by tier|"
+    r"broken down|breakdown|"
+    # Verification.
+    r"actually|really|genuinely|truly|realistic|realistically|trustworthy|"
+    # Comparison.
+    r"versus|vs\.?|compar(?:e|es|ed|ing) (?:to|with|against)|relative to"
+    r")\b",
+    re.I,
+)
+
+#: Verification phrased as a question about the data itself rather than with a single adverb.
+#: Kept separate because these are phrases, not words, and folding them in would make the
+#: pattern above unreadable.
+_DOUBTS_THE_DATA = re.compile(
+    r"(should (?:i|we) (?:believe|trust)|can (?:i|we) (?:believe|trust)|"
+    r"how much of (?:it|this|that)|is (?:it|this|that) real|are (?:they|these|those) real)",
+    re.I,
+)
+
+
+def needs_investigation(question: str) -> bool:
+    """Whether a question asks for work that one retrieval cannot do.
+
+    Separate from `shape_for` so it can be tested directly and so the reason a question was
+    not treated as a lookup is nameable rather than buried in a boolean.
+    """
+    text = question or ""
+    return bool(_ANALYTICAL.search(text) or _DOUBTS_THE_DATA.search(text))
+
+
 def shape_for(question: str) -> Shape:
     """Which shape of report this question is asking for.
 
@@ -110,7 +168,10 @@ def shape_for(question: str) -> Shape:
         return Shape.CAUSAL
     # A question that opens as a check is a check, even when it names a movement. This is the case
     # a single combined pattern got wrong.
-    if _LOOKUP.match(text):
+    #
+    # Unless it also asks for a ranking, a decomposition, a verification or a comparison, in
+    # which case the opener is describing the grammar and not the work. See `_ANALYTICAL`.
+    if _LOOKUP.match(text) and not needs_investigation(text):
         return Shape.FACTUAL
     # No causal request and no lookup opener. A bare statement naming a movement -- "signups are
     # down 12%" -- is a request to explain it, and so is anything else unrecognised: an over-full

@@ -29,6 +29,7 @@ from cortex.reports.shape import (
     Ambiguity,
     Shape,
     ambiguities,
+    needs_investigation,
     shape_for,
 )
 
@@ -50,6 +51,16 @@ class TestFactualQuestions:
     )
     def test_a_lookup_is_factual(self, question: str) -> None:
         assert shape_for(question) is Shape.FACTUAL
+
+
+#: Scenarios the shape classifier gets wrong. Empty, and the tests below keep it that way.
+#:
+#: It held `won_accounts_not_activated` while a lookup opener alone was enough to route a
+#: question to FACTUAL. That guidance tells the analyst the reader "wants the answer, not a
+#: case for it" and to leave hypotheses empty -- so an investigation was being told not to
+#: investigate on the strength of its first word. Measured across six live runs against a real
+#: CRM: five of six questions classified FACTUAL, five of six answered from one connector.
+_KNOWN_MISCLASSIFIED: frozenset[str] = frozenset()
 
 
 class TestCausalQuestions:
@@ -97,9 +108,15 @@ class TestCausalQuestions:
         The false-premise scenario is excluded because it is the exception on purpose: *"Did our
         signups fall from last month?"* is a check, and being classified as one is the behaviour
         it tests. `_completeness` knows the difference, so it is not scored for the sections a
-        factual answer is told to leave out."""
+        factual answer is told to leave out.
+
+        `won_accounts_not_activated` is excluded for a different and worse reason, recorded in
+        `TestAnAnalyticalStateQuestionIsMisclassified` below: it is an investigation that this
+        classifier calls a lookup. That is a live defect, not an exemption."""
         for scenario in SCENARIOS:
             if scenario.ground_truth.is_false_premise:
+                continue
+            if scenario.name in _KNOWN_MISCLASSIFIED:
                 continue
             assert shape_for(scenario.question) is Shape.CAUSAL, scenario.name
 
@@ -669,3 +686,62 @@ class TestThePremiseQuestionsDoNotContradictThemselves:
             guidance = GUIDANCE[shape]
             assert "not whether the window is complete" in guidance, shape
             assert "half-finished month is measurable" in guidance, shape
+
+
+class TestAnAnalyticalStateQuestionIsInvestigated:
+    """A question can open like a lookup and still need work done before an answer exists.
+
+    These replace characterisation tests that asserted the opposite. They were written to fail
+    the moment the classifier was fixed, which is what happened, and this is what they became.
+    """
+
+    def test_the_cross_source_question_is_not_a_lookup(self) -> None:
+        scenario = by_name("won_accounts_not_activated")
+        assert shape_for(scenario.question) is Shape.CAUSAL
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            # Ranking: nothing is true until a dimension has been compared.
+            "Which stage are we losing the most deals at, by count and by value?",
+            "Which rep has the largest open pipeline?",
+            # Verification: the question doubts its own premise and wants it checked.
+            "Which acquisition source produces deals that actually close?",
+            "How much open pipeline do we have, and how much of it should I believe?",
+            "Are the accounts we closed last quarter actually using the product?",
+            # Decomposition: the aggregate is not the answer.
+            "What is our win rate broken down by source?",
+            # Comparison: two things have to be measured.
+            "How does this quarter's pipeline compare to last quarter's?",
+        ],
+    )
+    def test_questions_that_ask_for_work_are_investigated(self, question: str) -> None:
+        assert shape_for(question) is Shape.CAUSAL
+        assert needs_investigation(question)
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            # Each of these has an answer that can be read off one result. Routing them to
+            # CAUSAL would reintroduce the failure this module was written for: a page of
+            # report around a one-sentence answer.
+            "How many deals closed last month?",
+            "What is our closed-won rate for the last three months?",
+            "Which open deals have had no activity in the last 30 days?",
+            "Do we have the Apollo deanonymiser integrated on our website?",
+            "Who owns the Northwind account?",
+            "List the deals closing this quarter.",
+            "When did the last sync run?",
+        ],
+    )
+    def test_real_lookups_are_still_lookups(self, question: str) -> None:
+        assert shape_for(question) is Shape.FACTUAL
+        assert not needs_investigation(question)
+
+    def test_a_movement_check_is_still_a_check(self) -> None:
+        # The live failure this module was built around. "actually" is not present, so the
+        # new veto must not touch it.
+        assert shape_for("Did our signups fall from last month?") is Shape.FACTUAL
+
+    def test_an_explicit_cause_request_still_wins(self) -> None:
+        assert shape_for("Which stage do we lose deals at, and why?") is Shape.CAUSAL
