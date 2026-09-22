@@ -428,3 +428,47 @@ class TestTheReadToolContract:
         assert isinstance(schema, dict)
         assert schema["additionalProperties"] is False
         assert schema["required"] == ["evidence_id"]
+
+
+class TestNonAsciiReachesTheModelAsItself:
+    """Real data has umlauts and typographic dashes in it. Fixtures do not.
+
+    `json.dumps` defaults to `ensure_ascii=True`, so a payload naming "Schonherr" with an
+    o-umlaut reached the model as `Sch\\u00f6nherr`. The model does not merely read that
+    badly -- it imitates the convention, and writes escapes into its own prose. A real
+    HubSpot run answered "the closed-won rate was 12.3% \\u2014 9 deals won", and that is
+    the string a customer would have read in their own report.
+
+    2,800 tests missed it because every fixture in the suite is pure ASCII.
+    """
+
+    def test_an_umlaut_survives_rendering(self) -> None:
+        rendered = render_payload({"deals": [{"name": "Schönherr Rechtsanwälte"}]})
+        assert "Schönherr Rechtsanwälte" in rendered
+        assert "\\u00f6" not in rendered
+
+    def test_an_em_dash_survives_rendering(self) -> None:
+        # The exact character the live run turned into an escape.
+        rendered = render_payload({"note": "renewal — expansion"})
+        assert "renewal — expansion" in rendered
+        assert "\\u2014" not in rendered
+
+    def test_no_payload_renders_a_unicode_escape(self) -> None:
+        payload = {
+            "rows": [
+                {"company": "Mölnlycke", "stage": "closed won"},
+                {"company": "Ørsted", "note": "Q3 — renewal"},
+                {"company": "日本電気", "note": "“quoted”"},
+            ]
+        }
+        rendered = render_payload(payload)
+        assert "\\u" not in rendered, rendered
+        for expected in ("Mölnlycke", "Ørsted", "日本電気", "“quoted”"):
+            assert expected in rendered
+
+    def test_the_rendering_is_still_valid_json(self) -> None:
+        # Readability for the model must not cost machine-parseability.
+        import json as _json
+
+        payload = {"rows": [{"company": "Mölnlycke — AB"}]}
+        assert _json.loads(render_payload(payload)) == payload

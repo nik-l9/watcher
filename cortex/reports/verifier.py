@@ -736,14 +736,19 @@ def render_evidence(rows: Iterable[Evidence], *, max_chars: int) -> list[str]:
     """
     blocks: list[str] = []
     for row in rows:
-        payload = json.dumps(_aggregates_first(row.payload), indent=2, default=str)
+        params = json.dumps(row.params, sort_keys=True, default=str, ensure_ascii=False)
+        # ensure_ascii=False for the reason given in `reading.render_payload`: escaped
+        # non-ASCII is both harder for a model to read and a convention it imitates.
+        payload = json.dumps(
+            _aggregates_first(row.payload), indent=2, default=str, ensure_ascii=False
+        )
         truncated = len(payload) > max_chars
         if truncated:
             payload = payload[:max_chars]
         blocks.append(
             f"--- evidence {row.id} ---\n"
             f"tool: {row.tool_name}.{row.capability}\n"
-            f"parameters: {json.dumps(row.params, sort_keys=True, default=str)}\n"
+            f"parameters: {params}\n"
             f"observed_at: {row.observed_at.isoformat() if row.observed_at else 'unknown'}\n"
             f"from_nightly_sync: {row.from_cache}\n"
             # Disclosed, so a reader does not treat a cut-off payload as evidence that a
