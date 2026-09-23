@@ -85,7 +85,7 @@ _ROW_COUNT = re.compile(r"\((\d[\d,]*) rows?\)")
 #: evidence ids, both worth showing. It also holds the URL each observation came from, and
 #: those carry the tenant's own object ids:
 #:
-#:     hubspot://crm/v3/objects/companies/REDACTED/engagements
+#:     hubspot://crm/v3/objects/companies/40000000001/engagements
 #:
 #: That is a customer's CRM record, addressable by anyone with access to the portal, printed
 #: beside a report whose every figure had been blanked. Five digits or more, and only inside
