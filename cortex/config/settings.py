@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     #: diagnostic interleaved with the report is noise the reader cannot tell from output.
     log_level: Literal["debug", "info", "warning", "error"] = "debug"
 
+    #: Ask, once, whether anything reachable is still missing before the loop is allowed to
+    #: finish. See cortex/agents/gaps.py.
+    #:
+    #: Off by default and read at construction rather than baked in, because the honest
+    #: comparison is against the loop exactly as it was -- and because the last change of this
+    #: shape, an unconditional reflection turn, measured worse than doing nothing.
+    gap_recheck: bool = False
+
     postgres_dsn: str = "postgresql+asyncpg://cortex:cortex@localhost:5433/cortex"
 
     falkordb_host: str = "localhost"

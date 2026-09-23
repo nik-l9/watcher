@@ -29,9 +29,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.agents.employee import Employee, gtm_data_analyst
+from cortex.agents.gaps import GapCheck
 from cortex.agents.investigator import InvestigationFailed, Investigator
 from cortex.agents.llm import LLM
 from cortex.agents.timing import GATE, SUFFICIENCY, VERIFY
+from cortex.config.settings import get_settings
 from cortex.db.models import Investigation as InvestigationRow
 from cortex.db.models import Tenant
 from cortex.eval.fixtures import SCENARIOS, Scenario
@@ -473,6 +475,9 @@ class EvalHarness:
             # answer and the scenario scores it wrong. Two scenarios were failing on exactly
             # this, and no amount of rewording the premise instruction could have fixed it.
             today=scenario.as_of,
+            # None unless CORTEX_GAP_RECHECK is set, so a suite run reproduces the loop as
+            # shipped and the two arms of a paired measurement differ by one thing.
+            gap_check=GapCheck(self._llm) if get_settings().gap_recheck else None,
         )
 
         try:

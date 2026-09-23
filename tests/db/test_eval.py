@@ -741,7 +741,17 @@ class TestHarnessEndToEnd:
             # scenario has to be asked the question on the same date the scenario was
             # written for, or it is being graded against a different question.
             built.append("called")
-            assert set(kwargs) == {"llm", "registry", "executor", "employee", "today"}
+            assert set(kwargs) == {
+                "llm",
+                "registry",
+                "executor",
+                "employee",
+                "today",
+                # Always passed, None unless CORTEX_GAP_RECHECK is set. Part of the contract
+                # rather than an extra: a rival loop scored on this suite has to be offered
+                # the same chance to reopen itself, or the two are not being compared.
+                "gap_check",
+            }
             assert kwargs["today"] == scenario.as_of
             return Investigator(**kwargs)  # type: ignore[arg-type]
 

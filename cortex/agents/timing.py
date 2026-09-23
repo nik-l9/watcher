@@ -51,7 +51,12 @@ VERIFY = "verify"
 #: The sufficiency gate (ADR 0005 decision 6), added after these were first named.
 SUFFICIENCY = "sufficiency"
 
-PHASES = (SURVEY, RECALL, LOOP_MODEL, LOOP_TOOLS, DRAFT, GATE, VERIFY, SUFFICIENCY)
+#: The gap check that decides whether the loop may finish. Timed separately because it is a
+#: new per-investigation cost and the suite is already failing its latency budget -- folding
+#: it into the loop would hide exactly the number that decides whether it is worth keeping.
+GAP_CHECK = "gap_check"
+
+PHASES = (SURVEY, RECALL, LOOP_MODEL, LOOP_TOOLS, GAP_CHECK, DRAFT, GATE, VERIFY, SUFFICIENCY)
 
 
 @dataclass(slots=True)
