@@ -1,9 +1,10 @@
 Investigating: Why did signups drop in the second half of June?
 Dataset: campaign_traffic_drop_undecidable (synthetic, labelled)  model: claude-sonnet-5  effort: low
 This takes a few minutes. Progress:
-  gathered 15 observations in 83s; grounding the report
+  gathered 15 observations in 68s; grounding the report
   verifying each claim against its own evidence
-  sufficiency gate: the evidence does NOT support a cause (5.2s); missing: A dated record of a paid search campaign budget change, pause, or bid adjustment around June 15-16 (e.g. Google Ads change history log); Confirmation that the '(not set)' campaign sessions drop corresponds to a specific ad platform action, not a tracking/tagging change; A comparable unaffected series or explanation ruling out tracking/instrumentation changes as the cause of the Paid Search session drop
+  verifier removed 1 claim(s)
+  sufficiency gate: the evidence does NOT support a cause (5.6s); missing: Ad platform (Google Ads/Meta) campaign or budget change log around June 15 explaining the Paid Search sessions drop; Confirmation of no GA4 tracking/tagging change for paid campaigns in mid-June; Any deploy/config change log outside the two GitHub repos checked (e.g. marketing site, ad landing pages) covering June 10-30; A control channel/series unaffected by the change to rule out tracking-wide issues
   sufficiency gate withheld 1 causal claim(s)
 
 ==============================================================================
@@ -11,26 +12,24 @@ Q: Why did signups drop in the second half of June?
 ==============================================================================
 
 Confidence: insufficient evidence
-Took 83s over 6 steps, 29,379 tokens, 15 observations gathered, 11 cited
+Took 68s over 5 steps, 28,155 tokens, 15 observations gathered, 10 cited
 
 ANSWER
 ------------------------------------------------------------------------------
-  Signups dropped from about 57/day to about 33/day starting June 15, 2026, a sustained ~42% decline.  [posthog.event_trend 206e3b6b]
-  This tracks a 74% fall in Paid Search sessions and conversions over the same split of the month, while Organic Search stayed flat.  [ga4.compare_periods ffe4536a]
-  Conversion rates for paid versus organic visitors were essentially identical across June, so this is a loss of paid traffic volume, not a broken or degraded signup funnel.  [ga4.get_funnel ea6fe8b4]
-  No code changes in the product or website repositories were found in the relevant window, and no Slack record explains why the campaign was cut, so the underlying reason for the campaign change (budget exhaustion vs. deliberate pause) is still unconfirmed.  [github.commits c9976f9e, github.commits 23ac1387, slack.search_messages fa833180]
+  Signups dropped sharply on 2026-06-15, from roughly 57/day to roughly 33/day, and stayed there through June 30.  [posthog.event_trend 471521f7]
+  This matches the timing and channel of a ~75% collapse in Paid Search sessions and conversions, while Organic Search traffic was unaffected, pointing to a paid-acquisition cutoff rather than a product or site-wide break.  [ga4.get_sessions 4f702913, ga4.compare_periods 9d8d1f75]
+  No commits in the product, mobile, or website repositories, and no Slack record of a campaign or budget decision, were found for this window, so the specific trigger on the ad-platform side remains unidentified.  [github.commits 0d9f7b94, github.commits 8126121f, slack.search_messages 1239d283, slack.search_messages c86bae51, slack.search_messages 52f41b27, slack.find_decision a5145c32]
 
 FINDINGS
 ------------------------------------------------------------------------------
-  Signups fell sharply starting June 15  (high)
-    - Daily signups held steady around 54-60/day from June 1-14, then dropped to a sustained ~31-35/day from June 15 onward, a level shift of about -42%.  [posthog.event_trend 206e3b6b]
-  The drop is concentrated in Paid Search traffic  (high)
-    - Comparing June 16-30 to June 1-15, Paid Search sessions fell 74% (11,070 to 2,876) and Paid Search conversions fell 74% (454 to 118), while Organic Search sessions and conversions were essentially flat (-0.25% and -0.26%).  [ga4.compare_periods ffe4536a]
-  The paid drop traces to a single campaign, 'spring-2026-brand', cut on June 15  (high)
-    - Daily sessions from the 'spring-2026-brand' campaign ran steady at roughly 755-793/day from June 1-14, then fell to roughly 186-196/day beginning June 15 and stayed there through June 30, while the '(not set)' channel stayed flat around 617-649/day across the entire month.  [ga4.get_sessions d8544a4b]
-    - The onset of the campaign traffic drop (June 15) coincides with the onset of the signup level shift (June 15).  [ga4.get_sessions d8544a4b, posthog.event_trend 206e3b6b]
-  Conversion rate for Paid Search vs Organic Search was unchanged across June, ruling out an on-site or product conversion problem  (high)
-    - Across the full month, Paid Search and Organic Search converted at nearly identical rates (4.10% and 4.10% respectively), indicating the drop is a traffic-volume effect from reduced paid sessions rather than a change in how well paid visitors convert once they land.  [ga4.get_funnel ea6fe8b4]
+  Signups stepped down sharply on 2026-06-15, sustained through month end  (medium)
+    - Daily signups averaged ~56.8/day from June 1-14 and dropped to ~32.9/day from June 15-30, a level shift of about -42%.  [posthog.event_trend 471521f7]
+  Paid Search sessions and conversions collapsed on the same date, while Organic Search was unaffected  (medium)
+    - Paid Search sessions fell from roughly 780-790/day in the June 1-14 window to roughly 190/day from June 15 onward, and GA4's aggregated period comparison shows Paid Search sessions down 74% and conversions down 74% for June 16-30 versus June 1-15.  [ga4.get_sessions 4f702913, ga4.compare_periods 9d8d1f75]
+    - Organic Search sessions stayed essentially flat across the same split, down only 0.25%, indicating the drop was isolated to the paid channel rather than a site-wide traffic problem.  [ga4.compare_periods 9d8d1f75]
+    - The Paid Search collapse and the signup level shift both land on 2026-06-15/16, the same few days.  [ga4.get_sessions 4f702913, posthog.event_trend 471521f7]
+  No code, flag, or Slack record  (medium)
+    - No feature flags were found in PostHog, and Slack searches for signup breakage, paid search campaign activity, ad budget, and a decision search for PPC all returned zero matches, so no human record of a deliberate campaign change or an incident was found via these tools.  [posthog.feature_flags 21d41f75, slack.search_messages c86bae51, slack.search_messages 1239d283, slack.search_messages 52f41b27, slack.find_decision a5145c32]
 
 CHARTS
 ------------------------------------------------------------------------------
@@ -47,64 +46,61 @@ CHARTS
 
 HYPOTHESES TESTED
 ------------------------------------------------------------------------------
-  [contradicted] A product or website code change (deploy/regression) around mid-June broke or degraded the signup flow, causing the drop.
-      No commits were found in acme/product (June 10-30) or acme/company-website (June 10-20) that could account for a signup-flow regression, and the conversion rate for visitors who did land (Paid vs Organic, both ~4.1%) was unchanged, arguing against a broken funnel.
-  [inconclusive] A paid marketing campaign ('spring-2026-brand') was cut back or ended around June 15, reducing paid traffic volume and therefore signups.
-      The campaign's session volume fell ~75% on June 15, the same day Paid Search overall fell 74% in the period split and the same day the signup level shift began. Conversion rates were unchanged, so this reads as a volume effect from less paid traffic rather than a worse-converting funnel.
-  [contradicted] A general market or seasonal decline in organic demand drove the signup drop.
-      Organic Search sessions and conversions were flat (-0.25%/-0.26%) across the same split, so demand outside the paid channel did not move.
+  [contradicted] A shipped code change (deploy) to the signup or checkout flow caused the drop.
+      No commits exist in the product or mobile repos for the June 10-30 window that would explain a signup-flow regression starting June 15.
+  [inconclusive] A collapse in Paid Search traffic (budget cut, campaign pause, or account issue) drove the signup drop.
+      Paid Search sessions fell ~75% starting on the same date the signup level shift begins, while Organic Search stayed flat, isolating the drop to the paid channel and timing it to match signups. This is a strong correlation, not a proven mechanism -- no Slack decision or campaign record was found to name what changed on the paid-search side.
+  [contradicted] An organic/site-wide problem (e.g. broken signup form, mobile app issue) caused the drop.
+      Organic Search sessions and conversions were essentially unchanged across the split, which rules out a site-wide form or infrastructure break; only the paid channel moved.
 
 RECOMMENDATIONS
 ------------------------------------------------------------------------------
-  P1 Investigate the ad platform account/dashboard for the 'spring-2026-brand' campaign directly to confirm whether it was paused, ran out of budget, or was throttled starting June 15, since Slack has no record of this decision.
-      why: GA4 session data pins the cutoff to June 15 for this specific campaign, but we have no visibility into paid-media platforms directly, and no internal message confirms intent.
-      [ga4.get_sessions d8544a4b]
-  P2 If the campaign cut was unintentional or a budget lapse, restore spending to the prior daily level to recover the ~24-26 signups/day gap.
-      why: The signup level shift (from ~57/day to ~33/day) matches the scale of lost paid conversions, and organic conversion quality is unaffected, so restoring paid volume should restore signups proportionally.
-      [posthog.event_trend 206e3b6b, ga4.compare_periods ffe4536a]
+  P1 Pull the paid search ad platform's own campaign/billing history for June 14-16 (outside the tools available here) to identify the specific campaign pause, budget exhaustion, or account issue that cut Paid Search sessions by ~75%.
+      why: GA4 confirms the channel and the date but not the mechanism; no Slack or GitHub record was found, so the root cause artefact must come from the ad platform directly.
+      [ga4.get_sessions 4f702913, ga4.compare_periods 9d8d1f75]
+  P1 If the paid search cutoff was unintentional, restore the campaign/budget to its early-June level and monitor daily signups for a return toward the ~57/day pre-June-15 baseline.
+      why: Signups tracked Paid Search sessions closely in timing and no other channel or code change moved during the same window.
+      [posthog.event_trend 471521f7, ga4.get_sessions 4f702913]
 
 RISKS AND CAVEATS
 ------------------------------------------------------------------------------
-  - We could not find a Slack message, decision record, or budget change confirming why the 'spring-2026-brand' campaign volume fell on June 15 -- searches for 'signup drop', 'paid campaign budget', 'spring-2026-brand', and 'ad spend' in Slack all returned zero results. The campaign cutoff is established by GA4 session data, but the reason for the cutoff (budget exhaustion, deliberate pause, platform-side issue) is not confirmed by any human record we have access to.
-  - An empty commit search result for acme/product and acme/company-website in mid-June is not proof no code shipped; it is only what these two repositories' commit history in this window shows to this tool. If a change shipped through a path not visible here, it would not appear.
-  - 5 claim(s) go beyond their evidence and are retained with reduced confidence rather than removed, because the rest of each one holds. What the check found:
-- executive_summary[0]: The 56.8→32.9 (-42.1%) shift at June 15 matches the data, but the payload explicitly marks 'established' as null and unable to be tested, so calling it 'sustained' overstates the c
-- executive_summary[2]: The dates match and the session drop pattern is shown, but the signup shift was explicitly flagged as not established/tested, and the movement_note warns against attributing a caus
-- executive_summary[3]: Conversion rates are indeed nearly identical (4.1015% vs 4.102%), but the evidence shows only one month's snapshot with no comparison to prior periods or volume trends, so it canno
-- executive_summary[4]: The Slack search only covered the query 'signup drop', not campaign-cut reasons or budget/pause terms, so it doesn't establish that no Slack record anywhere explains the campaign c
-- ... and 1 more.
-  - 1 causal claim(s) were withheld: a separate check of the evidence gathered, made without seeing this report, found that it does not support a definitive answer about cause. The data shows Paid Search sessions and conversions collapsed ~74% in the second half of June and signups show a level shift around June 15, but every search for a decision, commit, or announcement explaining why Paid Search dropped returned zero results. There is a correlated movement but no dated cause connecting it, so the reader would have to infer 'paid campaign was cut' without any supporting record. What would settle it: A dated record of a paid search campaign budget change, pause, or bid adjustment around June 15-16 (e.g. Google Ads change history log); Confirmation that the '(not set)' campaign sessions drop corresponds to a specific ad platform action, not a tracking/tagging change; A comparable unaffected series or explanation ruling out tracking/instrumentation changes as the cause of the Paid Search se
+  - No named artefact (ad account change, campaign pause ticket, budget decision) was found to confirm what specifically stopped paid search traffic on June 15 -- the finding rests on a strong same-day correlation between two GA4/PostHog series, not a documented cause. Slack and GitHub searches came back empty across every query tried, which could mean nothing happened there, or that the relevant record uses different terms or lives outside the tools searched.
+  - The comparison used is the first half of June (1-15) against the second half (16-30); against a different baseline (e.g. same period last year, or a longer pre-period), the magnitude of the shift could read differently, though the abrupt step on June 15 itself would still stand.
+  - The posthog level-shift test could not establish statistical significance for this break because the post-period (16 days) is not shorter than the pre-period (14 days), so the tool's own permutation test has no power here; the shift is visually stark but formally untested.
+  - 1 claim(s) were removed because an independent check found the cited evidence did not support them. Treat the remaining conclusions with corresponding caution.
+  - 1 claim(s) go beyond their evidence and are retained with reduced confidence rather than removed, because the rest of each one holds. What the check found:
+- executive_summary[2]: Evidence covers commits only for acme/product and acme/mobile, with no website repository query shown, so the claim's mention of 'website repositories' is unsupported by the cited
+  - 1 causal claim(s) were withheld: a separate check of the evidence gathered, made without seeing this report, found that it does not support a definitive answer about cause. The data shows both signups and Paid Search sessions/conversions dropped sharply around June 15, and all commit/Slack/feature-flag searches returned empty, which shows nobody found a recorded cause rather than that none exists. There is no dated candidate cause (budget cut, campaign pause, tracking change) linking the paid search collapse to the signup drop, so the correlation is observed but not explained. What would settle it: Ad platform (Google Ads/Meta) campaign or budget change log around June 15 explaining the Paid Search sessions drop; Confirmation of no GA4 tracking/tagging change for paid campaigns in mid-June; Any deploy/config change log outside the two GitHub repos checked (e.g. marketing site, ad landing pages) covering June 10-30; A control channel/series unaffected by the change to rule out tracking-
 
 DATA QUALITY
 ------------------------------------------------------------------------------
-  - The posthog level-shift test could not formally establish significance for the June 15 break because the post-break window (16 days) was not shorter than the pre-break window (14 days), so the shift is reported as observed but statistically untested by that method. The magnitude and timing nonetheless line up precisely with the GA4 paid-traffic cutoff.
-  - 7 of the 11 cited observation(s) returned no results (github.commits, slack.find_decision, slack.search_messages). Conclusions resting on them describe what was not found, which is not the same as what does not exist.
+  - The posthog event_trend level-shift detector flagged the June 15 break but explicitly could not test it for significance given the pre/post window lengths available; treat the shift as observed in the raw daily series (60→34 signups on June 15) rather than as a statistically validated break.
+  - 7 of the 10 cited observation(s) returned no results (github.commits, posthog.feature_flags, slack.find_decision, slack.search_messages). Conclusions resting on them describe what was not found, which is not the same as what does not exist.
 
 SOURCES
 ------------------------------------------------------------------------------
-  ffe4536a  ga4.compare_periods  eval://ga4__compare_periods
-  ea6fe8b4  ga4.get_funnel  eval://ga4__get_funnel
-  d8544a4b  ga4.get_sessions  eval://ga4__get_sessions
-  c9976f9e  github.commits  eval://github__commits
-  23ac1387  github.commits  eval://github__commits
-  206e3b6b  posthog.event_trend  eval://posthog__event_trend
-  9e781f22  slack.find_decision  eval://slack__find_decision
-  fa833180  slack.search_messages  eval://slack__search_messages
-  dc22fc2d  slack.search_messages  eval://slack__search_messages
-  416a4c06  slack.search_messages  eval://slack__search_messages
-  2cfcaf8f  slack.search_messages  eval://slack__search_messages
+  9d8d1f75  ga4.compare_periods  eval://ga4__compare_periods
+  4f702913  ga4.get_sessions  eval://ga4__get_sessions
+  0d9f7b94  github.commits  eval://github__commits
+  8126121f  github.commits  eval://github__commits
+  471521f7  posthog.event_trend  eval://posthog__event_trend
+  21d41f75  posthog.feature_flags  eval://posthog__feature_flags
+  a5145c32  slack.find_decision  eval://slack__find_decision
+  c86bae51  slack.search_messages  eval://slack__search_messages
+  1239d283  slack.search_messages  eval://slack__search_messages
+  52f41b27  slack.search_messages  eval://slack__search_messages
 
-phase breakdown (97s wall, 97s measured)
+phase breakdown (81s wall, 81s measured)
   phase        calls  seconds  share    mean  tokens
   survey           1      0.0    0%     0.0  in 0 out 0
   recall           1      0.0    0%     0.0  in 0 out 0
-  loop_model       6     42.3   44%     7.1  in 12 out 3,382 cached 84,299
-  loop_tools       5      0.1    0%     0.0  in 0 out 0
-  draft            1     40.3   42%    40.3  in 22,561 out 3,424
+  loop_model       5     33.3   41%     6.7  in 10 out 2,791 cached 59,324
+  loop_tools       4      0.1    0%     0.0  in 0 out 0
+  draft            1     34.2   42%    34.2  in 21,983 out 3,371
   gate             1      0.0    0%     0.0  in 0 out 0
-  verify           1      8.6    9%     8.6  in 27,561 out 1,215
-  sufficiency      1      5.2    5%     5.2  in 5,801 out 285
-  cache hit rate: 60%
+  verify           1      7.4    9%     7.4  in 26,810 out 780
+  sufficiency      1      5.6    7%     5.6  in 5,097 out 300
+  cache hit rate: 52%
 
 WHAT THE DATA ACTUALLY CONTAINED
 ------------------------------------------------------------------------------

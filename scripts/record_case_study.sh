@@ -80,6 +80,17 @@ for name in $scenarios; do
 
   asciinema convert --output-format txt --overwrite \
     "${OUT}/${name}.cast" "${OUT}/${name}.txt"
+
+  # A recording of a traceback is not a case study, and it looks exactly like one from the
+  # outside: the file exists, it has the right name, and the script says it wrote it. Eleven
+  # were produced in a row that way -- the repository this runs in has no ANTHROPIC_API_KEY,
+  # by design, and every run died on the first model call while the loop reported success.
+  if grep -q "^Traceback (most recent call last):" "${OUT}/${name}.txt"; then
+    echo "REFUSING: ${name} recorded a traceback, not an investigation." >&2
+    sed -n '/^Traceback/,$p' "${OUT}/${name}.txt" | tail -3 >&2
+    rm -f "${OUT}/${name}.cast" "${OUT}/${name}.txt"
+    exit 1
+  fi
 done
 
 echo "wrote ${count} recording(s) to ${OUT}/" >&2

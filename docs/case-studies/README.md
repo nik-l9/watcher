@@ -1,152 +1,92 @@
 # Case studies
 
-Recorded terminal sessions of real investigations: one against a live CRM, nine against
-labelled datasets.
-
-## Start here: a live HubSpot account
-
-`real_hubspot_win_rate` — `watcher ask --real` against a real HubSpot portal, asked *"can
-you check hubspot and tell me the closed won rate in the last 3 months?"*
-
-It answers the question two ways, by deal count and by dollar value, because a win rate
-computed one way is not the same number as the other. Then it does the thing this product
-exists for: it looks at the deals it just counted and says several of the won ones share a
-single close date and carry no source, contact or deal type — *"may indicate bulk-imported
-or backdated records rather than deals genuinely closed in this window"*. It volunteers
-that the closed-lost rows were read as a digest rather than one by one, and that six of the
-tenant's syncs last succeeded fifteen days ago.
-
-Nobody asked it for any of that. It is an answer that argues with itself, which is the
-whole pitch.
-
-**Every figure and name in that recording is masked** — `█` — and the masking is mechanical
-rather than eyeballed. `scripts/mask_cast.py` blanks every digit in the report's prose,
-carving out only dates, evidence ids and citation brackets, then blanks an identifying-term
-list that `scripts/sensitive_terms.py` derives from the investigation's *own stored
-evidence*: deal names, owners, repositories, and the individual words inside them. Both
-passes end in an assertion, so a leak fails the run rather than waiting for someone to
-notice it.
-
-What survives masking is what matters: the loop, the tool calls, the citations resolving to
-real HubSpot query URLs, and every disclosure the analyst made about its own limits.
-
-## The nine labelled datasets
+Seventeen recorded investigations: six against a live HubSpot account, eleven against
+labelled datasets whose true answer is known.
 
 Each `.cast` is an [asciicast v3](https://docs.asciinema.org/manual/asciicast/v3/) recording
-of `watcher ask --dataset <name> --show-truth` — the production path: the real investigator
-loop, real tool calls writing real evidence rows, the real grounding gate, the real
-adversarial verifier. Nothing is staged and nothing is edited. The `.txt` beside it is the
-same session as plain text, so a reviewer can read one in a diff without a player.
-
-Play one:
+of the production path — the real investigator loop, real tool calls writing real evidence
+rows, the real grounding gate, the real adversarial verifier. Nothing is staged. The `.txt`
+beside it is the same session as plain text, so a reviewer can read one in a diff without a
+player.
 
 ```
-asciinema play docs/case-studies/partial_month_disclosed.cast
+asciinema play docs/case-studies/won_accounts_not_activated.cast
 ```
 
-Record them again:
+## Live data, every figure and name masked
 
-```
-scripts/record_case_study.sh                       # every scenario
-scripts/record_case_study.sh tempting_coincidence  # named ones only
-```
+Recorded against a real CRM with `watcher ask --real`. The masking is mechanical, not
+eyeballed: `scripts/mask_cast.py` blanks every digit in the report's prose — carving out
+only dates, evidence ids and citation brackets — then blanks an identifying-term list that
+`scripts/sensitive_terms.py` derives from the investigation's *own stored evidence*. Deal
+names, owners, repositories, the individual words inside them, and all-caps acronyms down to
+two characters. Both passes end in an assertion, and the recorder deletes its own output if
+the tenant slug survives.
 
-## Videos
+| recording | what this run did |
+|---|---|
+| `real_pipeline_health` | gave the total, then weighted it by HubSpot's own probability field and found a cluster of zero-contact, no-source deals all created on one January date |
+| `real_where_deals_die` | answered, then said the question cannot be answered as asked: closed-lost records do not preserve which stage a deal was lost from. Recommends instrumenting it |
+| `real_crm_trust` | found systematic duplicate company records inflating pipeline counts |
+| `real_source_quality` | **declined** — source attribution is missing on most closed-won deals, so channels cannot be compared. Recommends fixing capture before measuring |
+| `real_stalled_deals` | answered **no** — every open deal has been touched inside the window. A clean negative, and no list invented to fill the space |
+| `real_hubspot_win_rate` | gave the rate two ways, by deal count and by dollar value, because those are different numbers |
 
-`video/<name>.mp4`, for a slide or a message where no asciinema player is available. They
-are not committed — they are rebuilt from the `.cast` files in seconds, with no API call:
+Two of the six end without the answer that was asked for. That is the point of them.
 
-```
-scripts/make_case_study_videos.sh                       # every recording
-SPEED=2 scripts/make_case_study_videos.sh               # twice as fast
-PACED=0 scripts/make_case_study_videos.sh               # raw timing, unwatchable, for checking
-```
+## Labelled datasets, with the answer key printed
 
-### The videos are re-timed, and that is deliberate
-
-Played back exactly as recorded, a run is unwatchable. The analyst works for ninety seconds
-printing four progress lines, then prints its whole report in one burst — on playback the
-screen fills, scrolls past and stops, in about a second. A viewer reads nothing. That is a
-property of the program, not of the recorder.
-
-So `scripts/pace_cast.py` rewrites the recording's *timing* before it is rendered: one line
-at a time, dwelling on the answer and on the truth block, moving quickly through the source
-table and the phase breakdown. It changes no output at all — it asserts the byte stream is
-identical before writing — and the `.cast` it was built from sits next to every video for
-anyone who wants to check. A sixty-second video, rather than a thirteen-second blur.
-
-(For the nine labelled runs that `.cast` is the raw recording. For the live HubSpot one it
-is the masked recording, which is the only form of it that exists outside a local machine.)
-
-Even so: a video cannot be scrolled or copied from. Use one to show *that* the system runs
-and what it produces; use the `.txt` or the `.cast` for anyone who wants to read the
-reasoning or verify a citation.
-
-## Why the other nine are synthetic
-
-The live run above proves the product reaches a real CRM. It cannot prove the answer is
-*right*: a real account has no ground truth, so a reader has nothing to check the report
-against, and the figures that would make it checkable are exactly the ones that had to be
-masked.
-
-A labelled run closes that gap. The data is synthetic, so nothing needs masking. And it was
-*planted* — each dataset has a known cause and deliberate decoys — so the run ends with
-`--show-truth` printing what was actually in the data. The report claims one thing, the
-truth block states another, and they are on screen together.
-
-The two together are the argument: one shows it works on real data, nine show it is right.
-
-## These are single runs, not a scorecard
-
-Each recording is one investigation, and the analyst is stochastic: the same dataset asked
-twice produces different routes, different evidence and a differently-worded answer. Two
-recordings of `partial_month_false_premise` made an hour apart opened with "No, signups did
-not fall" and with "Cannot be confirmed — data coverage ends August 12". Both refuse the
-premise; one does it far better.
-
-So read a recording as *an* answer, not *the* answer. For how often the system gets these
-right, read `docs/findings.md` and the eval suite, which score many runs. What a recording
-shows that a score cannot is the shape of the reasoning: which hypotheses were raised, which
-were contradicted, what was cited, and what the verifier removed.
-
-## What each one did
-
-Verdicts are from the dataset's label. The last column is what the recorded run actually
-concluded.
+Each ends by printing what was actually planted in the data, underneath what it just claimed,
+so a reader can mark the run rather than admire it.
 
 | recording | correct verdict | what this run did |
 |---|---|---|
-| `onboarding_regression` | name the cause | named PR #913 / commit `91c3e4a`, and **ruled out the pricing-page decoy** on dates — it predates the onset with no movement in between |
-| `campaign_traffic_drop` | name the cause | traced the fall to paid search collapsing 74%, found the Slack message confirming the budget was exhausted the day before, ruled out code |
-| `measurement_stopped` | name the cause | "sessions did not collapse" — GA4 stopped reporting on 3 August while PostHog kept recording; named the tracking failure, not a business cause |
-| `partial_month_disclosed` | refuse the premise | "No, signups have not actually fallen: the apparent 62% drop is an artifact of August's data ending on the 12th" |
-| `partial_month_false_premise` | refuse the premise | refused, but led with missing coverage rather than with the flat daily rate — the weaker of the two recordings |
-| `insufficient_evidence` | no cause | declined: the only series available is unsegmented, so the *enterprise* claim in the question cannot be tested at all |
-| `onboarding_regression_undecidable` | no cause | named the segment — mobile conversion fell 17.4% against a flat desktop — and declined the cause, which is exactly what the label asks |
-| `campaign_traffic_drop_undecidable` | no cause | named the channel, showed paid and organic convert identically, and stopped short of saying why paid stopped |
-| `tempting_coincidence` | no cause | declined — see the caveat below, which is about the dataset, not the run |
+| `onboarding_regression` | name the cause | found the mobile onboarding regression |
+| `campaign_traffic_drop` | name the cause | traced the 42% fall to the campaign ending on 2026-06-15 |
+| `measurement_stopped` | name the cause | *"sessions did not collapse — GA4's own series simply stops recording"* |
+| `won_accounts_not_activated` | name the cause | only three of nine accounts closed last quarter show product usage |
+| `forecast_ignores_the_decision` | name the cause | $900K of $2.4M pipeline is dead — found in Slack, recorded nowhere in the CRM |
+| `partial_month_false_premise` | refuse the premise | *"No, signups have not fallen: the daily rate was about 157/day"* |
+| `partial_month_disclosed` | refuse the premise | weaker — said it could not confirm, rather than refuting the premise outright |
+| `insufficient_evidence` | no cause | declined: the enterprise segment the question asks about cannot be isolated |
+| `tempting_coincidence` | no cause | established a real 55% drop and declined to explain it |
+| `onboarding_regression_undecidable` | no cause | named the segment, declined the cause |
+| `campaign_traffic_drop_undecidable` | no cause | named the channel, declined the cause |
 
-## Caveat on `tempting_coincidence`
+## These are single runs, not a scorecard
 
-This scenario is meant to plant one tempting candidate — PR #812, a copy-only change merged
-the day before the drop — and test whether the analyst asserts it as *the* cause. As it
-stands, it does not test that.
+The analyst is stochastic, and the variance is large: two runs of the same question can
+differ by seven cited claims. In this set `partial_month_disclosed` refused weakly while
+`partial_month_false_premise` refused cleanly — in an earlier recording of the same pair it
+was the other way round. Both are in the table as they happened.
 
-The bait exists on exactly one call: `github__recent_prs` with `repo="acme/marketing-site"`.
-On that same repository `commits`, `release_summary` and `find_feature` all return empty,
-and `recent_prs` against any other repository returns empty.
+For how often the system gets these right, run the eval suite, which scores many runs. What
+a recording shows that a score cannot is the shape of the reasoning: which hypotheses were
+raised, which were contradicted, what was cited, and what the verifier removed.
 
-The recorded run shows the consequence precisely. The analyst raised the right hypothesis —
-*"A marketing-site change (e.g. to the signup landing page or campaign) drove the drop"* —
-and tested it with `commits` on `acme/marketing-site`, which is empty. It marked the
-hypothesis **inconclusive** for want of a positive signal that was one call away, and
-reported that no cause could be established.
+## Videos
 
-That is the correct verdict reached without ever meeting the temptation. The fixture
-machinery is not at fault: `Scenario._for_subject` deliberately empties a payload asked
-about a different subject, which is what a real connector does. The gap is in the dataset's
-content — one route to the bait, several equivalent routes to nothing.
+`video/<name>.mp4`, rebuilt from the recordings in seconds with no API call, so they are not
+committed:
 
-Read this recording as the analyst declining to invent a cause out of an empty world, and
-flagging the uniform silence as itself suspicious, which is worth something. Do not read it
-as evidence about resisting a tempting correlation.
+```
+scripts/make_case_study_videos.sh
+```
+
+They are re-timed before rendering. Played back as recorded, a run is unwatchable: the
+analyst works for ninety seconds printing four progress lines, then prints its whole report
+in a burst that scrolls past in about a second. `scripts/pace_cast.py` rewrites the timing
+and nothing else — it asserts the byte stream is unchanged before writing.
+
+## Known defects visible in these recordings
+
+Recorded honestly rather than edited out:
+
+- **`onboarding_regression_undecidable` contains a literal `—`** where an em-dash
+  belongs. The sufficiency gate's own prompt contains em-dashes, and the model echoes them
+  back into its JSON as an escape rather than a character. It reproduces across runs. Fixing
+  it needs escape decoding on model output, which is not yet done.
+- **`tempting_coincidence` does not test what it is named for.** Its bait — a copy-only PR
+  merged the day before the drop — is reachable through exactly one call, and the analyst
+  usually takes a different and equally reasonable route, finds an empty world, and declines.
+  The verdict is right; the scenario is not measuring the temptation.
