@@ -41,6 +41,61 @@ still moving is breadth and route stability — the same question can take a dif
 run, and while six of eight labelled scenarios reach the same answer every time, two do not.
 Read a report's *risks* and *data quality* sections, not only its answer.
 
+## Watch it work
+
+Seventeen unedited recordings of the production path — real loop, real tool calls, real
+evidence rows, real verifier. Nothing staged.
+
+<p align="center">
+  <img src="docs/case-studies/img/investigating.gif" alt="watcher investigating: the question, the tool calls, the answer" width="820">
+</p>
+
+<p align="center"><sub><i>Asked whether the accounts closed last quarter are actually using the product — an answer that exists in no single tool.</i></sub></p>
+
+### …then check whether it was right
+
+Every labelled run ends by printing what was **actually planted in the data**, underneath what
+it just claimed. The question stops being *does this sound right* and becomes *did it get it
+right*.
+
+<p align="center">
+  <img src="docs/case-studies/img/answer-key.gif" alt="the run printing what was actually planted in the data" width="820">
+</p>
+
+### The recordings
+
+**Six against a live HubSpot account.** Every figure and customer name is blanked by a script
+that derives its term list from the investigation's own evidence and asserts its own
+completeness.
+
+| | asked | what it did |
+|---|---|---|
+| 📉 | how much open pipeline is real? | weighted by stage probability, then found a cluster of zero-contact deals created on one January date — [`recording`](docs/case-studies/real_pipeline_health.txt) |
+| 🔍 | which stage do we lose deals at? | answered, then said the question **cannot be answered as asked** — lost deals don't record their stage — [`recording`](docs/case-studies/real_where_deals_die.txt) |
+| 🧹 | can I trust our CRM data? | systematic duplicate company records inflating the counts — [`recording`](docs/case-studies/real_crm_trust.txt) |
+| 🚫 | which source closes best? | **declined** — attribution missing on most won deals — [`recording`](docs/case-studies/real_source_quality.txt) |
+| ✅ | which deals went quiet? | answered **no**, and invented no list to fill the space — [`recording`](docs/case-studies/real_stalled_deals.txt) |
+| 📊 | what's our win rate? | gave it twice, by count and by value — [`recording`](docs/case-studies/real_hubspot_win_rate.txt) |
+
+**Eleven against labelled datasets**, each with a planted cause and deliberate decoys. Four of
+them have nothing to find — the correct answer is a refusal, which is where a confident-sounding
+system does its damage.
+
+| verdict | recordings |
+|---|---|
+| name the cause | [`onboarding_regression`](docs/case-studies/onboarding_regression.txt) · [`campaign_traffic_drop`](docs/case-studies/campaign_traffic_drop.txt) · [`measurement_stopped`](docs/case-studies/measurement_stopped.txt) · [`won_accounts_not_activated`](docs/case-studies/won_accounts_not_activated.txt) · [`forecast_ignores_the_decision`](docs/case-studies/forecast_ignores_the_decision.txt) |
+| refuse the premise | [`partial_month_false_premise`](docs/case-studies/partial_month_false_premise.txt) · [`partial_month_disclosed`](docs/case-studies/partial_month_disclosed.txt) |
+| no cause to find | [`insufficient_evidence`](docs/case-studies/insufficient_evidence.txt) · [`tempting_coincidence`](docs/case-studies/tempting_coincidence.txt) · [`onboarding_regression_undecidable`](docs/case-studies/onboarding_regression_undecidable.txt) · [`campaign_traffic_drop_undecidable`](docs/case-studies/campaign_traffic_drop_undecidable.txt) |
+
+Play one in your terminal, or read the full write-up — including the two defects these
+recordings show rather than hide:
+
+```
+$ asciinema play docs/case-studies/won_accounts_not_activated.cast
+```
+
+→ **[docs/case-studies/](docs/case-studies/)**
+
 ## What you need
 
 The analyst is only offered connectors the tenant has credentials for, so **you can run this
