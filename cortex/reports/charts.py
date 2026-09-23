@@ -129,7 +129,12 @@ def render_chart(chart: ChartSpec, width: int = _WIDTH) -> str:
     `None` rather than `0`: a missing observation drawn at zero reads as a collapse.
     """
     lines = [f"  {chart.title}"]
-    if chart.y_label:
+    # The axis label is dropped when it says nothing the series row does not already say.
+    # A single-series trend takes its name from the payload's value column, so a PostHog
+    # event series rendered as "value" above a row also labelled "value" -- the same word
+    # twice, which reads as an unfinished interface rather than an axis.
+    names = {series.name for series in chart.series}
+    if chart.y_label and names != {chart.y_label}:
         lines.append(f"  {chart.y_label}")
 
     axis = _axis(chart)
@@ -140,7 +145,12 @@ def render_chart(chart: ChartSpec, width: int = _WIDTH) -> str:
         cells = [_cell(values.get(x), scale) for x in axis]
         rendered = "".join(cells)[:width]
         low, high = _range(series)
-        lines.append(f"    {series.name[:18]:18} |{rendered}|  {low} → {high}")
+        # "range 459-1,110", not "459 → 1,110". These are the series minimum and maximum,
+        # and an arrow between them is read by everyone as a movement from the first to the
+        # second. A report concluding that signups were *flat* rendered a chart beside it
+        # that appeared to say they had more than doubled -- same screen, opposite stories,
+        # and the chart had never made that claim. The values were right; the notation lied.
+        lines.append(f"    {series.name[:18]:18} |{rendered}|  range {low}–{high}")
 
     if chart.annotations:
         # Markers on their own row, aligned under the column they annotate. This is the row

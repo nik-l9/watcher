@@ -355,6 +355,15 @@ async def _main(argv: list[str] | None = None) -> int:
         registry=registry,
         executor=ToolExecutor(registry),
         employee=gtm_data_analyst(),
+        # The same step-by-step reporter `--real` gets, and it was missing here.
+        #
+        # This is the path the README sends people to first, because it needs no credentials
+        # and its answer can be checked against a planted cause. It printed one line -- "
+        # gathered 17 observations in 78s" -- and then sat silent for a minute and a half.
+        # Somebody trying watcher for the first time, on the command we tell them to run, saw
+        # none of the loop they were told about: no step, no tool call, no decision to look
+        # again. A recording of that run shows a prompt, a pause, and a report.
+        progress=TerminalProgress(),
     )
 
     print(f"Investigating: {scenario.question}", file=sys.stderr)

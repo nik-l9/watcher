@@ -500,9 +500,9 @@ class Investigator:
         made, with their evidence ids, so the analyst can both reason from them and cite them.
 
         **Why this is not simply a tool the analyst may call.** Asked which pull request shipped
-        most recently to the company website, it searched `OpenHands/OpenHands` -- the only
-        repository name it had ever seen -- and honestly reported that it could not confirm an
-        answer. `OpenHands/company-website` exists and the ingest already knew about it. Nothing
+        most recently to the company website, it searched `acme/acme` -- the only repository
+        name it had ever seen -- and honestly reported that it could not confirm an answer.
+        `acme/company-website` exists and the ingest already knew about it. Nothing
         in the tool surface could have told the analyst, because all eight GitHub capabilities
         take a repository name as a parameter.
 

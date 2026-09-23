@@ -22,7 +22,9 @@ cd "$(dirname "$0")/.."
 
 NAME="${1:?usage: record_real_case_study.sh <name> \"<question>\"}"
 QUESTION="${2:?a question is required}"
-TENANT="${TENANT:-openhands}"
+# No default. A tenant slug is a real customer identifier and does not belong
+# checked into a public repository as anybody's convenience.
+TENANT="${TENANT:?set TENANT to the slug whose credentials to use}"
 OUT="${OUT:-docs/case-studies}"
 PY=.venv/bin/python
 
