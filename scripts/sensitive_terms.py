@@ -57,8 +57,19 @@ IDENTIFYING: dict[str, frozenset[str]] = {
     "slack": frozenset({"user", "username", "real_name", "channel", "text"}),
 }
 
-#: Values this short are not identifying and masking them wrecks the prose.
+#: Floor for a *derived token* -- a word pulled out of a longer name. Short fragments of a
+#: deal title are noise, and masking them wrecks the prose around them.
 MIN_LENGTH = 4
+
+#: Floor for a *whole field value*, which is a different thing: a company literally named
+#: "AMD" is identifying at three characters, and the shared floor of four let it through. It
+#: reached a recording as `hubspot__companies query='AMD'` -- the model had read it from a
+#: deal, so it was in the evidence, and the term list simply declined to carry it.
+#:
+#: Two is safe only because `mask_cast.py` matches a short term on a word boundary and
+#: case-sensitively. Without both, a tenant with a customer called "IT" would blank the word
+#: "it" across the whole report.
+MIN_VALUE_LENGTH = 2
 
 #: Connectors whose terms are also emitted broken into words.
 #:
@@ -110,7 +121,7 @@ def _collect(payload: Any, fields: frozenset[str], found: set[str]) -> None:
         for key, value in payload.items():
             if isinstance(value, str) and key.lower() in fields:
                 text = value.strip()
-                if len(text) >= MIN_LENGTH and not text.startswith("$"):
+                if len(text) >= MIN_VALUE_LENGTH and not text.startswith("$"):
                     found.add(text)
             else:
                 _collect(value, fields, found)
