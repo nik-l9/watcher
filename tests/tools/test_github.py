@@ -21,7 +21,7 @@ PRS = [
     {
         "number": 913,
         "title": "Rework onboarding modal",
-        "user": {"login": "nikhil"},
+        "user": {"login": "a-developer"},
         "state": "closed",
         "merged_at": "2026-07-20T10:00:00Z",
         "created_at": "2026-07-18T09:00:00Z",
@@ -37,7 +37,7 @@ DEPLOYMENTS = [
         "ref": "main",
         "environment": "production",
         "created_at": "2026-07-20T11:04:00Z",
-        "creator": {"login": "nikhil"},
+        "creator": {"login": "a-developer"},
     }
 ]
 
@@ -64,7 +64,7 @@ class TestRecentPrs:
         assert result.payload["count"] == 1
         pr = result.payload["pull_requests"][0]
         assert pr["number"] == 913
-        assert pr["author"] == "nikhil"
+        assert pr["author"] == "a-developer"
         assert pr["labels"] == ["growth", "onboarding"]
         assert result.source_ref
 
@@ -144,7 +144,7 @@ class TestCommitDiff:
         "sha": "91c3e4a7bd2f1e0c9a8b7d6e5f4a3b2c1d0e9f8a",
         "commit": {
             "message": "Rework onboarding modal",
-            "author": {"name": "Nikhil", "date": "2026-07-20T10:00:00Z"},
+            "author": {"name": "A Developer", "date": "2026-07-20T10:00:00Z"},
         },
         "stats": {"additions": 120, "deletions": 45},
         "files": [
@@ -221,7 +221,7 @@ class TestFindFeature:
                             "state": "closed",
                             "closed_at": "2026-07-20T10:00:00Z",
                             "html_url": "https://github.com/acme/web/pull/913",
-                            "user": {"login": "nikhil"},
+                            "user": {"login": "a-developer"},
                         }
                     ],
                 }

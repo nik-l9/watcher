@@ -32,9 +32,11 @@ few patterns that must survive:
 `verify()` then asserts the invariant directly: outside those carve-outs, no digit remains
 in a masked section. A leak is a failed assertion, not something a reviewer has to notice.
 
-Left alone deliberately: the progress lines, the run header (`Took 85s over 3 steps, 79,657
-tokens`), the source table and the phase breakdown. They carry no business figure, and they
-are what makes the run look like a run.
+Left alone deliberately: the timings and step numbers in the progress lines, the run header
+(`Took 85s over 3 steps, 79,657 tokens`), the source table and the phase breakdown. They
+carry no business figure and they are what makes a recording look like a run rather than a
+slideshow. The one exception is a row count -- `(73 rows)` is a deal count whatever line it
+appears on -- which is masked wherever it occurs.
 
 Usage:
     sensitive_terms.py > terms.txt
@@ -67,6 +69,39 @@ MASKED_SECTIONS = {
 
 #: Ends the masked region. Everything from here on is references and instrumentation.
 END_SECTIONS = {"SOURCES"}
+
+#: Counts that appear outside the report's prose and are still business figures.
+#:
+#: The progress lines sit before the report, so section-based masking never reached them --
+#: and one of them reads `got read hubspot.pipeline in full (73 rows)`, which is the tenant's
+#: open deal count in plain text, directly above a report whose every figure was blanked.
+#: Timestamps and step numbers in those same lines are left alone: they are what makes a
+#: recording look like a run rather than a slideshow.
+_ROW_COUNT = re.compile(r"\((\d[\d,]*) rows?\)")
+
+#: Record ids inside a source reference.
+#:
+#: The source table was exempt from digit masking on the grounds that it holds dates and
+#: evidence ids, both worth showing. It also holds the URL each observation came from, and
+#: those carry the tenant's own object ids:
+#:
+#:     hubspot://crm/v3/objects/companies/REDACTED/engagements
+#:
+#: That is a customer's CRM record, addressable by anyone with access to the portal, printed
+#: beside a report whose every figure had been blanked. Five digits or more, and only inside
+#: a URL: a date's longest run is its four-digit year, an API version is `v3`, and the
+#: evidence id sits in its own column outside the URL, so all three survive.
+_URL_IDS = re.compile(r"(?P<url>\w+://\S+)")
+_LONG_RUN = re.compile(r"\d{5,}")
+
+#: The value of a search query in a source reference.
+#:
+#: Blanked whole rather than term-matched, because the analyst does not always search for a
+#: name it was given. It writes prefixes: a portal holding "Dennison Freight" produced
+#: `?q=Denn`, which no term list contains and which still names the customer well enough to
+#: guess. A query against a CRM is a customer name or it is nothing, so there is nothing to
+#: lose by blanking all of it and a fragment to lose by being clever.
+_QUERY_VALUE = re.compile(r"(?<=[?&]q=)[^&\s]+")
 
 #: Patterns that must survive masking, in the order they are protected.
 KEEP = (
@@ -164,6 +199,14 @@ def mask(source: str, terms: list[str] | None = None) -> str:
         for line, masked in _sections(text.splitlines(keepends=True))
     )
     out = _mask_terms(out, terms or [])
+    out = _ROW_COUNT.sub(lambda m: f"({BLOCK * len(m.group(1))} rows)", out)
+    out = _URL_IDS.sub(
+        lambda m: _QUERY_VALUE.sub(
+            lambda q: BLOCK * min(len(q.group()), 12),
+            _LONG_RUN.sub(lambda d: BLOCK * len(d.group()), m.group("url")),
+        ),
+        out,
+    )
 
     # Re-emitted as one output event, plus whatever was not output (the exit status). A
     # recording being prepared for publication carries no information in its original

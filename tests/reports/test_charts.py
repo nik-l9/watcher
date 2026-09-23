@@ -181,7 +181,7 @@ class TestRendering:
     def test_the_value_range_is_printed(self) -> None:
         """The blocks show shape; the numbers are what a claim can be checked against."""
         chart = _chart(points=[("a", 1930.0), ("b", 2450.0)])
-        assert "1,930 → 2,450" in render_chart(chart)
+        assert "range 1,930–2,450" in render_chart(chart)
 
     def test_a_series_with_no_values_says_so_rather_than_drawing_zero(self) -> None:
         chart = _chart(points=[("a", None), ("b", None)])
@@ -364,3 +364,69 @@ class TestChartsAreDerivedNotAuthored:
         legend = [line.strip() for line in lines if line.strip().startswith("^")]
         assert legend[0].startswith("^1 earlier deploy")
         assert legend[1].startswith("^2 later deploy")
+
+
+class TestTheAxisLabelIsDroppedWhenItRepeatsTheSeries:
+    """A PostHog trend rendered "value" above a row also labelled "value".
+
+    A single-series trend takes its name from the payload's value column, and the y-axis
+    label is derived from the same place, so the chart printed the same word twice. It reads
+    as an unfinished interface rather than an axis, and it was visible in a published
+    recording before anyone noticed.
+    """
+
+    def _spec(self, y_label: str, series_name: str) -> ChartSpec:
+        points = [ChartPoint(x=f"2026-06-0{n}", y=float(n * 10)) for n in range(1, 6)]
+        return ChartSpec(
+            title="user signed up over time",
+            type="line",
+            y_label=y_label,
+            evidence_ids=[uuid.uuid4()],
+            series=[ChartSeries(name=series_name, points=points)],
+        )
+
+    def test_a_repeated_label_is_printed_once(self) -> None:
+        rendered = render_chart(self._spec("value", "value"))
+        assert rendered.count("value") == 1
+
+    def test_a_label_that_says_something_else_survives(self) -> None:
+        rendered = render_chart(self._spec("sessions", "mobile"))
+        assert "sessions" in rendered
+        assert "mobile" in rendered
+
+    def test_the_title_is_never_dropped(self) -> None:
+        assert "user signed up over time" in render_chart(self._spec("value", "value"))
+
+
+class TestTheRangeIsNotWrittenAsAMovement:
+    """`459 → 1,110` was the series minimum and maximum, not its start and end.
+
+    An arrow between two numbers is read as a change over the period. So a report whose
+    conclusion was that signups had *not* fallen -- flat at about 157 a day -- rendered a
+    chart directly beneath it that appeared to say they had more than doubled. Both numbers
+    were correct. The notation was the whole error, and it contradicted the answer on the
+    same screen.
+    """
+
+    def _chart(self, values: list[float]) -> ChartSpec:
+        points = [ChartPoint(x=f"2026-06-{n:02d}", y=v) for n, v in enumerate(values, start=1)]
+        return ChartSpec(
+            title="user signed up over time",
+            type="line",
+            y_label="signups",
+            evidence_ids=[uuid.uuid4()],
+            series=[ChartSeries(name="value", points=points)],
+        )
+
+    def test_it_is_labelled_a_range(self) -> None:
+        rendered = render_chart(self._chart([459, 900, 1110, 300]))
+        assert "range 300–1,110" in rendered
+
+    def test_no_arrow_suggests_a_movement(self) -> None:
+        assert "→" not in render_chart(self._chart([459, 900, 1110, 300]))
+
+    def test_a_flat_series_does_not_look_like_a_climb(self) -> None:
+        # The case that produced the contradiction: values within a few percent of each
+        # other must not render as one number arrowing into a larger one.
+        rendered = render_chart(self._chart([156, 157, 155, 158]))
+        assert "range 155–158" in rendered

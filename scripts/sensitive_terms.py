@@ -102,6 +102,7 @@ STOPWORDS = frozenset(
     inc ltd llc corp gmbh plc limited company
     the and for with from into via per and or not no yes
     q1 q2 q3 q4 fy phase stage round
+    our its one two top key pro max min set add see run now day mon tue wed thu fri
     """.split()
 )
 
@@ -132,7 +133,16 @@ def _identifying(word: str) -> bool:
     a deal title produces are prepositions. Matching is case-sensitive and word-anchored in
     `mask_cast.py`, so "AMD" blanks the company and leaves "amd" inside another word alone.
     """
-    return len(word) >= MIN_LENGTH or (word.isupper() and len(word) >= 2)
+    return (
+        len(word) >= MIN_LENGTH
+        or (word.isupper() and len(word) >= 2)
+        # A capitalised three-letter word inside a customer name is part of the name. This
+        # is the third round of this bug: a deal whose other tokens all masked rendered as
+        # "All █████", which tells a reader the first word of a customer they can now guess.
+        # STOPWORDS already removes The, And, For, Our, New and the rest, so what survives
+        # here is a name fragment rather than ordinary prose.
+        or (word[:1].isupper() and len(word) >= 3)
+    )
 
 
 def _collect(payload: Any, fields: frozenset[str], found: set[str]) -> None:

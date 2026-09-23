@@ -43,9 +43,20 @@ DWELL = {
     "WHAT THE DATA ACTUALLY CONTAINED": 0.60,
 }
 
-#: Before the report begins: the question, then the progress lines. Kept slow, because this
-#: is where a viewer learns what is being asked and that real work is happening.
-PREAMBLE_DWELL = 0.9
+#: Seconds the whole preamble gets -- the question and every progress line before the report.
+#:
+#: A budget rather than a per-line dwell, because the number of lines changed by an order of
+#: magnitude. It was 0.9s a line when a run printed four of them. Then the fixture path
+#: started reporting each step and tool call, as the live path always had, and the same
+#: constant turned forty-nine progress lines into forty-four seconds of watching a loop the
+#: viewer has already understood by line five.
+#:
+#: The report keeps its per-line dwell. That is the part someone is reading rather than
+#: watching, and it should not speed up because the loop happened to work harder.
+PREAMBLE_BUDGET = 14.0
+
+#: No line faster than this, however many there are, or the preamble becomes a flicker.
+PREAMBLE_FLOOR = 0.12
 
 #: Everything after the source table and before the truth block -- the phase breakdown.
 DEFAULT_DWELL = 0.06
@@ -79,6 +90,12 @@ def pace(source: str) -> str:
     # \r\n pairs a terminal emits and any final line without a newline.
     out_lines = text.splitlines(keepends=True)
 
+    # Everything before the report's opening rule is preamble, and it shares one budget.
+    preamble_lines = next(
+        (n for n, line in enumerate(out_lines) if line.strip() == REPORT_RULE), len(out_lines)
+    )
+    preamble_dwell = max(PREAMBLE_FLOOR, PREAMBLE_BUDGET / max(preamble_lines, 1))
+
     events: list[list[object]] = []
     section: str | None = None
     in_report = False
@@ -95,7 +112,7 @@ def pace(source: str) -> str:
             pending += SECTION_PAUSE
 
         if not in_report:
-            dwell = PREAMBLE_DWELL
+            dwell = preamble_dwell
         elif section is None:
             dwell = 0.25
         else:
