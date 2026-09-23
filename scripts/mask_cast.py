@@ -101,9 +101,26 @@ def _mask_terms(text: str, terms: list[str]) -> str:
             out.append(line)
             continue
         for term in terms:
-            line = re.sub(re.escape(term), BLOCK * min(len(term), 12), line, flags=re.IGNORECASE)
+            line = _blank(line, term)
         out.append(line)
     return "".join(out)
+
+
+#: At or below this length a term is matched on a word boundary and case-sensitively.
+#:
+#: Short names are real -- AMD, SAP, HP -- and a substring rule cannot carry them: masking
+#: "it" case-insensitively as a substring blanks a letter pair out of half the English in the
+#: report. A boundary-anchored, case-sensitive match blanks the company and leaves the
+#: pronoun alone.
+_SHORT_TERM = 4
+
+
+def _blank(line: str, term: str) -> str:
+    """Replace one identifying term wherever it appears in this line."""
+    block = BLOCK * min(len(term), 12)
+    if len(term) <= _SHORT_TERM:
+        return re.sub(rf"\b{re.escape(term)}\b", block, line)
+    return re.sub(re.escape(term), block, line, flags=re.IGNORECASE)
 
 
 def _mask_line(line: str) -> str:
@@ -153,8 +170,7 @@ def mask(source: str, terms: list[str] | None = None) -> str:
     # chunking, and pace_cast.py re-times it from the text regardless.
     trailing = [event for event in events if event[1] != "o"]
     return (
-        "\n".join([header, json.dumps([0.0, "o", out]), *(json.dumps(e) for e in trailing)])
-        + "\n"
+        "\n".join([header, json.dumps([0.0, "o", out]), *(json.dumps(e) for e in trailing)]) + "\n"
     )
 
 
@@ -163,7 +179,8 @@ def verify(masked: str, terms: list[str] | None = None) -> None:
     lines = masked.splitlines()
     # The header is checked alongside the output, for the reason given in `mask`.
     text = lines[0] + "".join(
-        event[2] for event in (json.loads(line) for line in lines[1:] if line.strip())
+        event[2]
+        for event in (json.loads(line) for line in lines[1:] if line.strip())
         if event[1] == "o"
     )
     for line, is_masked in _sections(text.splitlines()):
@@ -179,11 +196,13 @@ def verify(masked: str, terms: list[str] | None = None) -> None:
     # They were not, and the result was a portal with a deal named "Source ..." failing
     # verification against the word SOURCES in its own report heading -- the exemption
     # arguing with the assertion that enforces it.
-    lowered = "\n".join(
-        line for line in text.splitlines() if line.strip() not in STRUCTURAL
-    ).lower()
+    text_checked = "\n".join(line for line in text.splitlines() if line.strip() not in STRUCTURAL)
+    lowered = text_checked.lower()
     for term in terms or []:
-        if term.lower() in lowered:
+        # Checked exactly as it is masked, including the word-boundary rule for short terms.
+        if _blank(lowered if len(term) > _SHORT_TERM else text_checked, term) != (
+            lowered if len(term) > _SHORT_TERM else text_checked
+        ):
             raise AssertionError(f"identifying term survived: {term!r}")
 
 
