@@ -38,6 +38,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.agents.employee import Employee
+from cortex.agents.gaps import GapCheck, GapVerdict
+from cortex.agents.gaps import instruction as gap_instruction
 from cortex.agents.llm import (
     LLM,
     LLMAuthenticationFailed,
@@ -59,7 +61,15 @@ from cortex.agents.reading import (
     render_payload,
 )
 from cortex.agents.spin import SpinDetector
-from cortex.agents.timing import DRAFT, LOOP_MODEL, LOOP_TOOLS, RECALL, SURVEY, Timings
+from cortex.agents.timing import (
+    DRAFT,
+    GAP_CHECK,
+    LOOP_MODEL,
+    LOOP_TOOLS,
+    RECALL,
+    SURVEY,
+    Timings,
+)
 from cortex.agents.transcript import assert_valid
 from cortex.db.models import Evidence
 from cortex.db.threads import citable_investigation_ids, prior_context
@@ -289,6 +299,15 @@ class Investigation:
     #: Digested observations the analyst went back and read. The other half of the count.
     observations_read: int = 0
 
+    #: What the gap check decided, in order, when one was configured. Empty when it was not.
+    #: Kept so a run can be asked *why* it ran a second pass, or why it did not -- a re-entry
+    #: that fetched nothing useful and one that never fired look identical from the outside.
+    gap_verdicts: tuple[GapVerdict, ...] = ()
+
+    @property
+    def reentries(self) -> int:
+        return sum(1 for verdict in self.gap_verdicts if verdict.reopens)
+
     @property
     def gathered_evidence(self) -> bool:
         return bool(self.evidence_ids)
@@ -307,6 +326,8 @@ class Investigator:
         progress: ProgressSink | None = None,
         cancelled: Callable[[], Awaitable[bool]] | None = None,
         today: date | None = None,
+        gap_check: GapCheck | None = None,
+        max_reentries: int = 1,
     ) -> None:
         self._llm = llm
         self._registry = registry
@@ -321,6 +342,15 @@ class Investigator:
         # wrong; it had aged.
         self._today = today
 
+        # Off unless supplied, so every existing caller gets the loop exactly as it was and
+        # the change can be measured against it. See cortex/agents/gaps.py for why this is a
+        # separate assessment of the evidence rather than a reflection turn -- the reflection
+        # turn was tried here and measured worse.
+        self._gap_check = gap_check
+        # One. Every published version of this caps it, and the second re-entry is where the
+        # cost stops being bounded: a loop that can always ask for more never concludes.
+        self._max_reentries = max_reentries
+
         # Optional, and off by default. Memory is prior context, not evidence: a report can
         # only cite a resolvable evidence_id, so recall can shorten the path to a hypothesis
         # but can never be the grounds for one. Injected rather than constructed here so an
@@ -331,11 +361,11 @@ class Investigator:
         # from a hung one, which has already cost real debugging time here -- but losing an
         # event must never affect the investigation, so every emit is guarded.
         self._progress = progress
-        # Asked once per step. Cooperative rather than pre-emptive, and it has to cross a
-        # process boundary: the loop runs in a Celery worker while the cancel request arrives
-        # at the gateway, so a threading flag on the conversation -- the usual shape -- cannot
-        # see it. The check reads shared state instead, and the state it reads is the
-        # investigation row, which this codebase already treats as authoritative.
+        # Asked once per step. Cooperative, like OpenHands' CancellationToken, but it has to
+        # cross a process boundary: their loop and their cancel request are in one process,
+        # while ours runs in a Celery worker and the request arrives at the gateway. So the
+        # check reads shared state rather than a threading flag -- and the state it reads is
+        # the investigation row, which this codebase already treats as authoritative.
         self._cancelled = cancelled
         # Injectable so the wall-clock budget can be tested deterministically. A
         # test that reached the time limit by actually sleeping would be slow and
@@ -470,9 +500,9 @@ class Investigator:
         made, with their evidence ids, so the analyst can both reason from them and cite them.
 
         **Why this is not simply a tool the analyst may call.** Asked which pull request shipped
-        most recently to the company website, it searched `acme/acme` -- the only
+        most recently to the company website, it searched `OpenHands/OpenHands` -- the only
         repository name it had ever seen -- and honestly reported that it could not confirm an
-        answer. `acme/company-website` exists and the ingest already knew about it. Nothing
+        answer. `OpenHands/company-website` exists and the ingest already knew about it. Nothing
         in the tool surface could have told the analyst, because all eight GitHub capabilities
         take a repository name as a parameter.
 
@@ -653,6 +683,11 @@ class Investigator:
         # never fired. See cortex/agents/spin.py.
         spin = SpinDetector()
         stop_reason: StopReason = STEP_LIMIT
+        # What was fetched, in order, as one line each. Read only by the gap check, which
+        # needs to know what exists before it can say what is missing.
+        gathered: list[str] = []
+        reentries_left = self._max_reentries if self._gap_check is not None else 0
+        gap_verdicts: list[GapVerdict] = []
 
         for index in range(budget.max_steps):
             # Checked before the model call, which is where the money is. Checking after it
@@ -723,6 +758,44 @@ class Investigator:
                 # docs/eval-results.md run 15. The finding did not transfer; the measurement is
                 # what decides.
                 steps.append(Step(index=index, note=response.text[:2000] or "concluded"))
+
+                # The analyst believes it is finished. Before that is accepted, ask -- once,
+                # in a separate call that sees the evidence and not the reasoning -- whether
+                # anything reachable is still missing. See cortex/agents/gaps.py.
+                #
+                # Only here, and only on this branch. A run that stopped on time, tokens or
+                # spin is not short of ideas, and handing it more work is how the reflection
+                # turn lost an attempt to a 432-second overrun.
+                if self._gap_check is not None and reentries_left > 0 and evidence_ids:
+                    with timings.measure(GAP_CHECK):
+                        verdict = await self._gap_check.assess(
+                            question=question,
+                            gathered=gathered,
+                            capabilities=[
+                                str(spec.get("name", ""))
+                                for spec in self._registry.llm_tool_specs()
+                            ],
+                        )
+                    gap_verdicts.append(verdict)
+                    usage = usage + verdict.usage
+                    timings.record_usage(GAP_CHECK, verdict.usage)
+                    if verdict.reopens:
+                        reentries_left -= 1
+                        emit(
+                            self._progress,
+                            ProgressEvent(
+                                Phase.THINKING,
+                                detail=f"gap check reopened the loop: {verdict.gaps[0][:120]}",
+                                step=index + 1,
+                                observations=len(evidence_ids),
+                            ),
+                        )
+                        messages.append(
+                            Message(role="assistant", content=response.text or "(concluded)")
+                        )
+                        messages.append(Message(role="user", content=gap_instruction(verdict.gaps)))
+                        continue
+
                 stop_reason = CONCLUDED
                 break
 
@@ -801,6 +874,10 @@ class Investigator:
                 evidence_ids.append(outcome.evidence_id)
                 step.evidence_ids.append(outcome.evidence_id)
                 spin.record_observation(outcome.payload_hash)
+                # One line per observation, for the gap check to read at the end. Records
+                # emptiness explicitly: "returned nothing" is what stops it asking for a
+                # query that has already been tried.
+                gathered.append(_inventory_line(request, outcome))
                 results[request.id] = _render_observation(outcome, ledger.offer(outcome))
                 emit(
                     self._progress,
@@ -910,6 +987,7 @@ class Investigator:
             timings=timings,
             unread_observations=ledger.unread(),
             observations_read=ledger.read_count,
+            gap_verdicts=tuple(gap_verdicts),
         )
 
     # ------------------------------------------------------------------ drafting
@@ -1348,6 +1426,19 @@ def _empty_warning(executed: ExecutedTool) -> str:
         # turns "nothing found" into "you asked for an environment that does not exist".
         lines.append(f"What the source says about it: {executed.empty_hint}")
     return "\n".join(lines) + "\n"
+
+
+def _inventory_line(request: ToolRequest, outcome: ExecutedTool) -> str:
+    """One observation, as the gap check sees it.
+
+    Emptiness is stated rather than implied. "returned nothing" is what stops the check
+    asking for a query that has already been made and come back empty -- the single largest
+    category of unreachable gap in the recorded runs.
+    """
+    arguments = request.arguments or {}
+    shown = ", ".join(f"{key}={value!r}" for key, value in sorted(arguments.items()))[:200]
+    empty = outcome.is_empty
+    return f"{request.name}({shown}) -> {'returned nothing' if empty else 'returned data'}"
 
 
 def _drafting_instruction(

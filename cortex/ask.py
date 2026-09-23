@@ -34,12 +34,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cortex.agents.anthropic_llm import DEFAULT_EFFORT, DEFAULT_MODEL, AnthropicLLM
 from cortex.agents.employee import gtm_data_analyst
+from cortex.agents.gaps import GapCheck
 from cortex.agents.investigator import InvestigationFailed, Investigator
 from cortex.agents.progress import Phase, ProgressEvent, TerminalProgress, emit
 from cortex.agents.provider import build_llm
 from cortex.agents.service import confidence_score, record_usage
 from cortex.agents.timing import GATE, SUFFICIENCY, VERIFY
 from cortex.config.logging import configure_logging
+from cortex.config.settings import get_settings
 from cortex.db.models import Investigation as InvestigationRow
 from cortex.db.models import InvestigationStatus, Report, Tenant
 from cortex.db.threads import ParentNotFound, ThreadTooDeep, check_parent
@@ -584,6 +586,8 @@ async def _ask_real(args: argparse.Namespace) -> int:
                 employee=gtm_data_analyst(),
                 recall=HybridRecall(resources.vectors, resources.graph),
                 progress=reporter,
+                # None unless CORTEX_GAP_RECHECK is set. See cortex/agents/gaps.py.
+                gap_check=GapCheck(llm) if get_settings().gap_recheck else None,
             )
             parent_id = None
             if args.follow_up:
