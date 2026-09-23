@@ -112,8 +112,27 @@ def _tokens(term: str) -> set[str]:
     return {
         word
         for word in words
-        if len(word) >= MIN_LENGTH and word.lower() not in STOPWORDS and not word.isdigit()
+        if _identifying(word) and word.lower() not in STOPWORDS and not word.isdigit()
     }
+
+
+def _identifying(word: str) -> bool:
+    """Whether a word pulled out of a longer name is worth masking on its own.
+
+    Four characters, or two if the word is all capitals.
+
+    The second clause is the fix for a leak that survived one round of this. Lowering the
+    floor for whole field values caught a company literally named "AMD", but the company
+    arrived here as a *token* of a longer deal name -- three characters, below the token
+    floor -- and reached a recording as "the three largest open deals ($Nk each: ..., AMD)"
+    with every other name blanked beside it.
+
+    All-caps is the discriminator that makes a lower floor safe. An acronym in a CRM is
+    nearly always an organisation -- AMD, IBM, SAP, JPMC -- while the short lowercase tokens
+    a deal title produces are prepositions. Matching is case-sensitive and word-anchored in
+    `mask_cast.py`, so "AMD" blanks the company and leaves "amd" inside another word alone.
+    """
+    return len(word) >= MIN_LENGTH or (word.isupper() and len(word) >= 2)
 
 
 def _collect(payload: Any, fields: frozenset[str], found: set[str]) -> None:

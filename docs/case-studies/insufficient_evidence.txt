@@ -1,45 +1,44 @@
 Investigating: Why did enterprise signups fall 3% in the week of 22 May 2026?
 Dataset: insufficient_evidence (synthetic, labelled)  model: claude-sonnet-5  effort: low
 This takes a few minutes. Progress:
-  gathered 17 observations in 91s; grounding the report
+  gathered 21 observations in 97s; grounding the report
   verifying each claim against its own evidence
-  verifier removed 1 claim(s)
   sufficiency gate: skipped, this report asserts no cause (0.0s)
 
 ==============================================================================
 Q: Why did enterprise signups fall 3% in the week of 22 May 2026?
 ==============================================================================
 
-Confidence: low
-Took 91s over 6 steps, 24,852 tokens, 17 observations gathered, 12 cited
+Confidence: insufficient evidence
+Took 97s over 8 steps, 27,316 tokens, 21 observations gathered, 16 cited
 
 ANSWER
 ------------------------------------------------------------------------------
-  The available data cannot confirm that enterprise signups fell 3% in the week of 22 May 2026: the only signup series accessible is an unsegmented, all-plan total that shows no fall in that week, and two separate attempts to break it down by plan or URL both returned the same unsegmented figures rather than an enterprise-specific view.  [posthog.event_trend e7703522, posthog.event_trend 3b601160]
-  GA4 sessions actually rose during the week of 22 May compared to the prior week, giving no supporting signal of a broader traffic or funnel decline.  [ga4.get_sessions e8409164]
-  HubSpot CRM data, GitHub commit history, and Slack search all returned empty for this window, so no deploy, CRM, or internal-discussion evidence could be found to test candidate causes.  [hubspot.contacts 820b94d7, hubspot.search e28842e7, hubspot.closed_won f09b0597, github.commits d8044a84, github.commits 730b577b, slack.search_messages f32e6932, slack.search_messages 9068743f, slack.find_decision 501d200c]
+  The claim that enterprise signups fell 3% in the week of 22 May 2026 could not be verified: no tool available returned any data segmented by 'enterprise' tier, and the only signup series obtained (aggregate, all plans) shows no meaningful drop that week.  [posthog.event_trend cc8464c2, hubspot.contacts d5e56d93, hubspot.companies 007a62f5]
+  Every query scoped to enterprise, company, or deal data (HubSpot contacts/deals/companies, GA4 channel and page breakdowns) returned zero rows, and no supporting GitHub, Slack, or PostHog annotation evidence of a change or incident in this window was found either.  [hubspot.contacts d5e56d93, hubspot.search 2a1e18fa, hubspot.search 819a0e0c, hubspot.companies 007a62f5, ga4.get_sessions 619fa1e0, ga4.top_pages beea1748, github.commits d33d924d, github.commits cc202ec7, github.recent_prs 5949190c, github.issues ebe0c0bf, slack.search_messages 194891ae, slack.search_messages db3f894f, posthog.annotations 3190477c, posthog.feature_flags 1456d191]
+  Recommend confirming the exact enterprise-signup metric definition and re-running the investigation against a source that actually returns that segment before attributing any cause.  [posthog.event_trend cc8464c2]
 
 FINDINGS
 ------------------------------------------------------------------------------
-  No enterprise-segmented signup data exists for the window  (high)
-    - The event trend for 'user signed up' from 15–28 May 2026 returns only an aggregate count of all signups; requesting a breakdown by 'plan' or by '$current_url' returned identical unsegmented totals, indicating no plan/segment dimension was actually applied.  [posthog.event_trend e7703522, posthog.event_trend 3b601160]
-    - Total signups over the two weeks range from 25 to 28 per day with no visible break around 22 May, the date the question identifies as the start of the fall.  [posthog.event_trend e7703522]
-    - HubSpot contains no contact or deal records at all for 15–28 May 2026, so enterprise signups (which would typically be tracked as HubSpot leads/deals) cannot be measured from CRM data for this window either.  [hubspot.contacts 820b94d7, hubspot.search e28842e7, hubspot.closed_won f09b0597]
-  No corroborating signal of a fall in any adjacent metric  (medium)
-    - GA4 daily sessions for 15–28 May 2026 actually rose across the week of 22 May (708, 690, 710, 704, 715, 689, 648) compared to the prior week (685, 659, 676, 666, 663, 682, 682), showing no decline in top-of-funnel traffic that would explain a signup drop.  [ga4.get_sessions e8409164]
-    - A GA4 channel-level comparison between the two weeks returned zero rows, so no channel-level breakdown is available to support or contradict a change in acquisition mix.  [ga4.compare_periods 0861f369]
+  No enterprise-segmented signup data available  (medium)
+    - The only signup event series obtained is total 'user signed up' counts with no breakdown by plan or enterprise tier; a breakdown-by-plan request returned an unsegmented series.  [posthog.event_trend cc8464c2]
+  Total signups did not show a clear 3% weekly drop  (medium)
+    - Total daily signups for the week of 22-28 May 2026 (25,28,27,26,25,28,27) are within the same range as the prior week (28,26,28,28,27,28,28), with no discrete drop visible in the aggregate series.  [posthog.event_trend cc8464c2]
+  No HubSpot company/enterprise or deal records returned for the period  (medium)
+    - A HubSpot contacts query for leads created 15-28 May 2026 returned zero rows.  [hubspot.contacts d5e56d93]
+    - A HubSpot search for contacts created in that window with a company property, a search for closed-won deals, and a companies search for 'enterprise' all returned zero rows.  [hubspot.search 2a1e18fa, hubspot.search 819a0e0c, hubspot.companies 007a62f5]
+  No GA4 traffic, channel, or page data returned for the window  (medium)
+    - GA4 total sessions by date were retrievable and showed no decline (685-715 sessions/day across 15-28 May, actually rising slightly in the week of 22 May), but a channel-group breakdown and a top-pages query for the same window both returned zero rows.  [ga4.get_sessions 1a60aac0, ga4.get_sessions 619fa1e0, ga4.top_pages beea1748]
+  No deploys, PRs, issues, Slack discussion, or annotations found in this window  (medium)
+    - GitHub commit queries against acme/product for 15-28 May and for the wider 1 May-1 June window both returned zero commits, and a pull-request and issues query for the same repo returned zero results.  [github.commits d33d924d, github.commits cc202ec7, github.recent_prs 5949190c, github.issues ebe0c0bf]
+    - Slack searches for 'enterprise signups' and 'signup drop' after 15 May, a PostHog annotation search for 'signup', and a PostHog feature-flag search for 'enterprise' all returned zero results.  [slack.search_messages 194891ae, slack.search_messages db3f894f, posthog.annotations 3190477c, posthog.feature_flags 1456d191]
 
 CHARTS
 ------------------------------------------------------------------------------
   user signed up over time
   value
-    value              |█▃██▆██▁█▆▃▁█▆|  25 → 28
-                        2026-05-15 … 2026-05-28
-
-  user signed up over time
-  value
-    value              |█▃██▆██▁█▆▃▁█▆|  25 → 28
-                        2026-05-15 … 2026-05-28
+    value              |▆▃▃█▅▆▅▆▃▆▆▅▆▆▁▆▅▃▁▆▅|  25 → 29
+                        2026-05-08 … 2026-05-28
 
   sessions over time
   sessions
@@ -49,68 +48,63 @@ CHARTS
 
 HYPOTHESES TESTED
 ------------------------------------------------------------------------------
-  [inconclusive] A product deploy to acme/product or acme/web caused a drop in enterprise signups around 22 May 2026.
-      No commits were found in either repository for the window, which would rule this out, but commit history returning empty is also consistent with the connector not covering this period, so this is treated as inconclusive rather than contradicted.
-  [inconclusive] A sales/marketing or CRM-side change reduced enterprise lead flow, visible as a drop in HubSpot deals or contacts.
-      HubSpot returned zero contacts and zero deals for the entire window, both before and after 22 May, which cannot distinguish a decline from a total absence of connected data for this period.
-  [contradicted] The premise that enterprise signups fell 3% in the week of 22 May is correct and measurable in the available data.
-      The only signup series available is not segmented by enterprise vs. other plans despite two different breakdown attempts, and the aggregate series shows no fall of that magnitude beginning 22 May — daily totals stayed in a tight 25-28 band throughout.
+  [inconclusive] A product deploy in acme/product around 22 May caused the enterprise signup drop.
+      No commits, PRs, or issues were found in acme/product for either the immediate week or the full month around the date, so there is no artefact to name as a cause. This does not prove nothing shipped -- it is equally consistent with the query missing branch history -- so the hypothesis is unresolved rather than ruled out by a specific contradicting observation.
+  [inconclusive] A marketing traffic or channel shift reduced enterprise signups in the week of 22 May.
+      GA4 total sessions rose slightly in that week rather than falling, but the channel-breakdown and top-pages queries needed to attribute any change to a specific channel or page returned no rows, so this could not be tested at the segment level required.
+  [inconclusive] Enterprise signups specifically (as opposed to total signups) fell 3% in the week of 22 May 2026.
+      No tool returned data segmented by enterprise tier -- not PostHog (breakdown_property returned unsegmented), not HubSpot (all enterprise/company-scoped queries returned zero rows). The only signup series available, at the aggregate level, does not show a 3% drop in that week. The premise cannot be measured with the evidence obtained.
 
 RECOMMENDATIONS
 ------------------------------------------------------------------------------
-  P1 Confirm with the data/analytics team whether PostHog events carry a plan or segment property that identifies 'enterprise' users, and re-run the breakdown using the correct property name before re-investigating this question.
-      why: Both breakdown attempts ('plan', '$current_url') returned unsegmented totals identical to the unfiltered trend, indicating the property name used does not exist or does not distinguish enterprise accounts — the current data cannot support or refute the original claim.
-      [posthog.event_trend e7703522, posthog.event_trend 3b601160]
-  P1 Verify HubSpot connector coverage for May 2026 by checking a known-active period, since zero contacts and zero deals were returned for the entire 15–28 May window.
-      why: A complete absence of CRM records for two weeks is itself unusual and should be checked as a possible data gap rather than accepted as an accurate picture of enterprise pipeline activity.
-      [hubspot.contacts 820b94d7, hubspot.search e28842e7, hubspot.closed_won f09b0597]
-  P2 Ask whoever raised the original 3% figure which system and definition produced it, so the correct source can be queried directly.
-      why: None of the connected sources (PostHog aggregate, GA4, HubSpot) reproduce a 3% enterprise-specific weekly decline, so the number likely originates from a report or dashboard outside the tools available here.
-      [posthog.event_trend e7703522, ga4.get_sessions e8409164]
+  P1 Confirm with the analytics/RevOps team how 'enterprise signups' is defined and tracked (a specific PostHog cohort/property, a HubSpot lifecycle or company-tier filter, or a separate dashboard), then re-run this investigation against that exact definition.
+      why: No tool call scoped to 'enterprise' returned any rows across five different sources, which is inconsistent with a real 3% weekly movement being measurable at all -- the segment definition used in the question does not match anything queryable here.
+      [hubspot.contacts d5e56d93, hubspot.companies 007a62f5, posthog.feature_flags 1456d191]
+  P2 Do not act on the 3% figure until it is reproduced from a source that actually returns enterprise-segmented rows.
+      why: The aggregate signup series shows no corresponding drop in the week of 22 May, so the reported 3% cannot currently be corroborated or explained.
+      [posthog.event_trend cc8464c2]
 
 RISKS AND CAVEATS
 ------------------------------------------------------------------------------
-  - The 'enterprise' segment cannot be isolated in PostHog (no working plan/segment breakdown was returned), so a real enterprise-specific decline could be masked within a flat all-plan total.
-  - HubSpot returning zero rows for the entire two-week window for both contacts and deals suggests either a connector gap or a lifecycle-stage/date filter mismatch, not necessarily zero real activity — this should be verified before concluding CRM was quiet.
-  - GitHub commit history was empty for both acme/product and acme/web across the full window, which is unusual for active repositories and suggests the connector may not be returning commits for this period rather than there being no deploys.
-  - 1 claim(s) were removed because an independent check found the cited evidence did not support them. Treat the remaining conclusions with corresponding caution.
-  - 1 claim(s) go beyond their evidence and are retained with reduced confidence rather than removed, because the rest of each one holds. What the check found:
-- findings[1].claims[0]: The evidence exactly matches the numbers cited and shows the second week's values generally higher than the first week's, supporting the traffic comparison, though the causal infer
+  - Every enterprise- or company-scoped query (HubSpot contacts-with-company, HubSpot deals, HubSpot companies search, GA4 channel breakdown, GA4 top pages, GitHub commits/PRs/issues, Slack search, PostHog annotations, PostHog feature flags) returned zero rows. This pattern -- uniform emptiness across unrelated sources and filters -- is more consistent with the enterprise segment, or these particular filters, not being resolvable by the tools available than with a genuine absence of enterprise activity.
+  - The only signup series obtained is unsegmented; a 3% move within an 'enterprise' subset averaging a small share of ~27 daily signups could easily be invisible in, or masked by, the aggregate total.
 
 DATA QUALITY
 ------------------------------------------------------------------------------
-  - PostHog breakdown_property requests for 'plan' and '$current_url' both returned results identical to the unfiltered total series, suggesting the breakdown was not actually applied or the property does not exist in this dataset.
-  - HubSpot contacts, deals search, and closed-won queries all returned zero rows for the full 15–28 May window, which may reflect a connector or filter issue rather than genuine zero activity.
-  - GitHub commit history was empty for acme/product and acme/web for the full window despite both being active, non-archived repositories, suggesting the commits endpoint may not cover this date range.
-  - GA4 channel comparison between the two weeks returned zero comparison rows despite the underlying sessions series having data, indicating the comparison query itself did not resolve.
-  - 9 of the 12 cited observation(s) returned no results (ga4.compare_periods, github.commits, hubspot.closed_won, hubspot.contacts, hubspot.search, slack.find_decision, slack.search_messages). Conclusions resting on them describe what was not found, which is not the same as what does not exist.
+  - PostHog event_trend with breakdown_property='plan' returned an unsegmented series (breakdown_property came back null), so no plan/tier-level signup data was actually obtained despite requesting it.
+  - GA4 channel-group and top-pages queries for the same date range that successfully returned total sessions came back empty, suggesting a dimension or filter issue rather than a true absence of channel/page data.
+  - 14 of the 16 cited observation(s) returned no results (ga4.get_sessions, ga4.top_pages, github.commits, github.issues, github.recent_prs, hubspot.companies, hubspot.contacts, hubspot.search, posthog.annotations, posthog.feature_flags, slack.search_messages). Conclusions resting on them describe what was not found, which is not the same as what does not exist.
 
 SOURCES
 ------------------------------------------------------------------------------
-  0861f369  ga4.compare_periods  eval://ga4__compare_periods
-  e8409164  ga4.get_sessions  eval://ga4__get_sessions
-  d8044a84  github.commits  eval://github__commits
-  730b577b  github.commits  eval://github__commits
-  f09b0597  hubspot.closed_won  eval://hubspot__closed_won
-  820b94d7  hubspot.contacts  eval://hubspot__contacts
-  e28842e7  hubspot.search  eval://hubspot__search
-  e7703522  posthog.event_trend  eval://posthog__event_trend
-  3b601160  posthog.event_trend  eval://posthog__event_trend
-  501d200c  slack.find_decision  eval://slack__find_decision
-  f32e6932  slack.search_messages  eval://slack__search_messages
-  9068743f  slack.search_messages  eval://slack__search_messages
+  1a60aac0  ga4.get_sessions  eval://ga4__get_sessions
+  619fa1e0  ga4.get_sessions  eval://ga4__get_sessions
+  beea1748  ga4.top_pages  eval://ga4__top_pages
+  d33d924d  github.commits  eval://github__commits
+  cc202ec7  github.commits  eval://github__commits
+  ebe0c0bf  github.issues  eval://github__issues
+  5949190c  github.recent_prs  eval://github__recent_prs
+  007a62f5  hubspot.companies  eval://hubspot__companies
+  d5e56d93  hubspot.contacts  eval://hubspot__contacts
+  2a1e18fa  hubspot.search  eval://hubspot__search
+  819a0e0c  hubspot.search  eval://hubspot__search
+  3190477c  posthog.annotations  eval://posthog__annotations
+  cc8464c2  posthog.event_trend  eval://posthog__event_trend
+  1456d191  posthog.feature_flags  eval://posthog__feature_flags
+  194891ae  slack.search_messages  eval://slack__search_messages
+  db3f894f  slack.search_messages  eval://slack__search_messages
 
-phase breakdown (99s wall, 99s measured)
+phase breakdown (107s wall, 107s measured)
   phase        calls  seconds  share    mean  tokens
   survey           1      0.0    0%     0.0  in 0 out 0
   recall           1      0.0    0%     0.0  in 0 out 0
-  loop_model       6     45.9   46%     7.7  in 12 out 3,599 cached 86,927
-  loop_tools       5      0.2    0%     0.0  in 0 out 0
-  draft            1     44.7   45%    44.7  in 17,329 out 3,912
+  loop_model       8     50.4   47%     6.3  in 16 out 3,996 cached 132,297
+  loop_tools       7      0.1    0%     0.0  in 0 out 0
+  draft            1     46.9   44%    46.9  in 19,186 out 4,118
   gate             1      0.0    0%     0.0  in 0 out 0
-  verify           1      8.1    8%     8.1  in 17,966 out 1,016
+  verify           1      9.9    9%     9.9  in 20,652 out 910
   sufficiency      1      0.0    0%     0.0  in 0 out 0
-  cache hit rate: 71%
+  cache hit rate: 77%
 
 WHAT THE DATA ACTUALLY CONTAINED
 ------------------------------------------------------------------------------
