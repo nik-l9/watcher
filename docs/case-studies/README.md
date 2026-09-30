@@ -25,11 +25,11 @@ the tenant slug survives.
 
 | recording | what this run did |
 |---|---|
-| `real_pipeline_health` | gave the total, then weighted it by HubSpot's own probability field and found a cluster of zero-contact, no-source deals all created on one January date |
+| `real_pipeline_health` | gave the total, then argued a large slice of it should be excluded: deals whose close dates passed months ago, with no contacts and no recorded activity — a bulk-import fingerprint rather than a live sales motion |
 | `real_where_deals_die` | answered, then said the question cannot be answered as asked: closed-lost records do not preserve which stage a deal was lost from. Recommends instrumenting it |
-| `real_crm_trust` | found systematic duplicate company records inflating pipeline counts |
-| `real_source_quality` | **declined** — source attribution is missing on most closed-won deals, so channels cannot be compared. Recommends fixing capture before measuring |
-| `real_stalled_deals` | answered **no** — every open deal has been touched inside the window. A clean negative, and no list invented to fill the space |
+| `real_crm_trust` | found the deal records structurally complete and the problem one level up, at the company object: a deal with no company linked at all, one account split across four records, another buried in a pile of near-identical matches |
+| `real_source_quality` | **declined** — the largest labelled source turns out to be a record-creation label rather than a marketing channel, and about half of all deals carry no attribution at all, so channels cannot be compared. Recommends fixing capture before measuring |
+| `real_stalled_deals` | answered **no** — every open deal has been touched inside the window. A clean negative, and no list invented to fill the space. Then undercut its own answer: the field it measured is a proxy, and a spot check found a real gap behind a recently-modified record |
 | `real_hubspot_win_rate` | gave the rate two ways, by deal count and by dollar value, because those are different numbers |
 
 Two of the six end without the answer that was asked for. That is the point of them.

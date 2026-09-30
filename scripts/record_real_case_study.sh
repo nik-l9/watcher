@@ -62,6 +62,27 @@ mkdir -p "$OUT"
 asciinema convert --output-format txt --overwrite \
   "${OUT}/${NAME}.cast" "${OUT}/${NAME}.txt" >/dev/null 2>&1
 
+# The labelled recorder refuses a traceback and a run that stops early; this one did not,
+# and it published six of them in a row. Every credential lives in the vault, so a master
+# key that does not match the one the tenant's credentials were sealed with fails at the
+# first tool call -- and what is left is a well-formed, faithfully masked recording of a
+# stack trace, written out with `masked and verified` beside it.
+if grep -q "^Traceback (most recent call last):" "${OUT}/${NAME}.txt"; then
+  echo "REFUSING: ${NAME} recorded a traceback, not an investigation." >&2
+  sed -n '/^Traceback/,$p' "${OUT}/${NAME}.txt" | tail -3 >&2
+  rm -f "${OUT}/${NAME}.cast" "${OUT}/${NAME}.txt"
+  exit 1
+fi
+
+# A live run has no answer key to end on, so completeness is measured against the report's
+# own opening rule: reach that and the investigation produced something to publish.
+if ! grep -q "^=\{78\}$" "${OUT}/${NAME}.txt"; then
+  echo "REFUSING: ${NAME} stops before the report -- the run did not finish." >&2
+  tail -3 "${OUT}/${NAME}.txt" >&2
+  rm -f "${OUT}/${NAME}.cast" "${OUT}/${NAME}.txt"
+  exit 1
+fi
+
 # Belt and braces. The masker asserts its own invariants, but this is the check that has
 # actually caught things -- a tenant slug left in the cast header, among others.
 if grep -qiE "${TENANT}" "${OUT}/${NAME}.cast"; then
