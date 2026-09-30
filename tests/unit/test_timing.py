@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 
 from cortex.agents.llm import Usage
-from cortex.agents.timing import DRAFT, LOOP_MODEL, LOOP_TOOLS, VERIFY, Timings
+from cortex.agents.timing import DRAFT, LOOP_MODEL, LOOP_TOOLS, VERIFY, Phase, Timings
 
 
 class TestAttribution:
@@ -103,3 +103,43 @@ class TestRendering:
         timings.add(DRAFT, 2.0, Usage(input_tokens=20, output_tokens=2))
         assert timings.total_usage.input_tokens == 30
         assert timings.measured_seconds == 3.0
+
+
+class TestAFastPhaseIsNotAnAbsentOne:
+    """One decimal place put four different things in the same cell.
+
+    The grounding gate resolves citations against a dict in about two milliseconds and
+    printed `0.0`. The survey against canned fixture payloads printed `0.0`. Recall with no
+    memory configured printed `0.0`. And the sufficiency gate, correctly skipped because the
+    report asserted no cause, printed `0.0`.
+
+    A reader sees four zeros in a table of phases and concludes those steps did not run. Two
+    of them are the system working exactly as designed, and one of those two is the gate
+    every grounding claim in this project rests on.
+    """
+
+    def _rendered(self, **phases: float) -> str:
+        timings = Timings()
+        for name, seconds in phases.items():
+            phase = timings.phases.setdefault(name, Phase())
+            phase.calls += 1
+            phase.seconds += seconds
+        return timings.render(97.0)
+
+    def test_a_two_millisecond_phase_is_visible(self) -> None:
+        assert "0.002" in self._rendered(gate=0.0021)
+
+    def test_a_phase_that_did_nothing_still_reads_as_zero(self) -> None:
+        # A bare zero now means what it says, because the fast phases no longer look like it.
+        rendered = self._rendered(sufficiency=0.0)
+        assert "0.000" not in rendered
+
+    def test_seconds_keep_one_decimal(self) -> None:
+        # The long phases are the ones a reader is budgeting against; three places there
+        # would be noise.
+        assert "37.0" in self._rendered(draft=37.0)
+
+    def test_fast_and_absent_no_longer_render_alike(self) -> None:
+        fast = self._rendered(gate=0.002)
+        absent = self._rendered(gate=0.0)
+        assert fast != absent

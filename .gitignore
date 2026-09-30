@@ -31,3 +31,4 @@ eval-runs/
 # committed; these are regenerated from those in seconds by scripts/make_case_study_videos.sh
 # and cost nothing to rebuild, so ~20MB of them does not belong in history.
 docs/case-studies/video/
+onboarding.gif

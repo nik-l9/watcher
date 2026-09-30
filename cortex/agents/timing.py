@@ -59,6 +59,27 @@ GAP_CHECK = "gap_check"
 PHASES = (SURVEY, RECALL, LOOP_MODEL, LOOP_TOOLS, GAP_CHECK, DRAFT, GATE, VERIFY, SUFFICIENCY)
 
 
+def _duration(seconds: float) -> str:
+    """A phase's wall clock, at a precision that distinguishes fast from absent.
+
+    One decimal place put four different things in the same cell. The grounding gate
+    resolves citations against a dict in about two milliseconds and printed `0.0`; the
+    survey against canned fixture payloads printed `0.0`; recall with no memory configured
+    printed `0.0`; and the sufficiency gate, correctly skipped because the report asserts no
+    cause, printed `0.0`.
+
+    A reader sees four zeros in a table of phases and concludes those steps did not run. Two
+    of them are the system working exactly as designed, and one of the two is the gate every
+    grounding claim in this project rests on.
+    """
+    if seconds >= 1:
+        return f"{seconds:.1f}"
+    if seconds > 0:
+        # Three places, so a two-millisecond gate reads as 0.002 rather than as nothing.
+        return f"{seconds:.3f}"
+    return "0"
+
+
 @dataclass(slots=True)
 class Phase:
     calls: int = 0
@@ -134,8 +155,8 @@ class Timings:
             if usage.cache_read_input_tokens:
                 detail += f" cached {usage.cache_read_input_tokens:,}"
             lines.append(
-                f"  {name:<12} {phase.calls:>5} {phase.seconds:>8.1f} "
-                f"{share:>5.0%} {phase.mean_seconds:>7.1f}  {detail}"
+                f"  {name:<12} {phase.calls:>5} {_duration(phase.seconds):>8} "
+                f"{share:>5.0%} {_duration(phase.mean_seconds):>7}  {detail}"
             )
 
         unmeasured = wall - measured
