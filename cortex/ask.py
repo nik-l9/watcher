@@ -310,8 +310,11 @@ async def _sufficiency(
     elapsed = time.monotonic() - started
 
     if not decision.needed:
+        # No duration. The other branches print what the gate cost because that latency is
+        # the trade this change is judged on; this branch made no call at all, and the
+        # hardcoded `(0.0s)` it used to print read as a gate that ran and found nothing.
         print(
-            "  sufficiency gate: skipped, this report asserts no cause (0.0s)",
+            "  sufficiency gate: skipped, this report asserts no cause",
             file=sys.stderr,
         )
         return decision, AppliedSufficiency(report=report)

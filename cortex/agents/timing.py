@@ -74,10 +74,31 @@ def _duration(seconds: float) -> str:
     """
     if seconds >= 1:
         return f"{seconds:.1f}"
-    if seconds > 0:
+    if seconds >= 0.001:
         # Three places, so a two-millisecond gate reads as 0.002 rather than as nothing.
         return f"{seconds:.3f}"
+    if seconds > 0:
+        # Below a millisecond, three places round back to `0.000`, which a reader discounts
+        # exactly as they discounted `0.0`. An explicit bound cannot be read as absence.
+        return "<0.001"
     return "0"
+
+
+def _tokens(usage: Usage) -> str:
+    """A phase's token cost, or a statement that it never asked the model anything.
+
+    `in 0 out 0` was the other half of the same misreading as `0.0` seconds. The survey,
+    recall, the tool round trips, the grounding gate and a skipped sufficiency check all
+    spend no tokens because none of them calls a model -- that is their design, not a
+    failure -- and a row reading `0.0` next to `in 0 out 0` tells a reader the step did
+    nothing. Saying so in words costs one column and removes the ambiguity.
+    """
+    if not (usage.input_tokens or usage.output_tokens or usage.cache_read_input_tokens):
+        return "no model call"
+    detail = f"in {usage.input_tokens:,} out {usage.output_tokens:,}"
+    if usage.cache_read_input_tokens:
+        detail += f" cached {usage.cache_read_input_tokens:,}"
+    return detail
 
 
 @dataclass(slots=True)
@@ -151,9 +172,7 @@ class Timings:
                 continue
             share = phase.seconds / wall if wall else 0.0
             usage = phase.usage
-            detail = f"in {usage.input_tokens:,} out {usage.output_tokens:,}"
-            if usage.cache_read_input_tokens:
-                detail += f" cached {usage.cache_read_input_tokens:,}"
+            detail = _tokens(usage)
             lines.append(
                 f"  {name:<12} {phase.calls:>5} {_duration(phase.seconds):>8} "
                 f"{share:>5.0%} {_duration(phase.mean_seconds):>7}  {detail}"

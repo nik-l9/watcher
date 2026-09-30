@@ -9,7 +9,15 @@ from __future__ import annotations
 import time
 
 from cortex.agents.llm import Usage
-from cortex.agents.timing import DRAFT, LOOP_MODEL, LOOP_TOOLS, VERIFY, Phase, Timings
+from cortex.agents.timing import (
+    DRAFT,
+    GATE,
+    LOOP_MODEL,
+    LOOP_TOOLS,
+    VERIFY,
+    Phase,
+    Timings,
+)
 
 
 class TestAttribution:
@@ -143,3 +151,50 @@ class TestAFastPhaseIsNotAnAbsentOne:
         fast = self._rendered(gate=0.002)
         absent = self._rendered(gate=0.0)
         assert fast != absent
+
+    def test_a_sub_millisecond_phase_does_not_round_back_to_zero(self) -> None:
+        """Three decimal places fixed the two-millisecond gate and not the faster phases.
+
+        Recall with no memory configured and a correctly skipped sufficiency check both
+        take a few microseconds, and both printed `0.000` -- which a reader discounts for
+        exactly the reason they discounted `0.0`. A bound cannot be read as absence.
+        """
+        rendered = self._rendered(recall=0.0000004)
+        assert "<0.001" in rendered
+        assert "0.000" not in rendered
+
+    def test_an_absent_phase_is_still_a_bare_zero(self) -> None:
+        assert "<0.001" not in self._rendered(gate=0.0)
+
+
+class TestAPhaseThatNeverCallsTheModel:
+    """`in 0 out 0` was the other half of the same misreading.
+
+    The survey, recall, the tool round trips and the grounding gate spend no tokens because
+    none of them calls a model. Printed as `in 0 out 0` beside a near-zero duration, the row
+    reads as a step that did not run.
+    """
+
+    def _rendered(self, usage: Usage | None = None) -> str:
+        timings = Timings()
+        with timings.measure(GATE):
+            pass
+        if usage is not None:
+            timings.record_usage(GATE, usage)
+        return timings.render(97.0)
+
+    def test_it_says_so_rather_than_printing_zeros(self) -> None:
+        rendered = self._rendered()
+        assert "no model call" in rendered
+        assert "in 0 out 0" not in rendered
+
+    def test_a_phase_that_does_call_the_model_still_reports_tokens(self) -> None:
+        rendered = self._rendered(Usage(input_tokens=21_303, output_tokens=869))
+        assert "in 21,303 out 869" in rendered
+        assert "no model call" not in rendered
+
+    def test_cached_tokens_still_appear(self) -> None:
+        rendered = self._rendered(
+            Usage(input_tokens=8, output_tokens=2_889, cache_read_input_tokens=43_825)
+        )
+        assert "cached 43,825" in rendered
