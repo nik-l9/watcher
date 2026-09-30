@@ -42,23 +42,24 @@ so a reader can mark the run rather than admire it.
 | recording | correct verdict | what this run did |
 |---|---|---|
 | `onboarding_regression` | name the cause | found the mobile onboarding regression |
-| `campaign_traffic_drop` | name the cause | traced the 42% fall to the campaign ending on 2026-06-15 |
-| `measurement_stopped` | name the cause | *"sessions did not collapse — GA4's own series simply stops recording"* |
+| `campaign_traffic_drop` | name the cause | traced the 42% fall to paid ads being paused on 2026-06-14, the day before the drop |
+| `measurement_stopped` | name the cause | *"sessions did not collapse in August: GA4's own session series simply stops recording"* |
 | `won_accounts_not_activated` | name the cause | only three of nine accounts closed last quarter show product usage |
 | `forecast_ignores_the_decision` | name the cause | $900K of $2.4M pipeline is dead — found in Slack, recorded nowhere in the CRM |
-| `partial_month_false_premise` | refuse the premise | *"No, signups have not fallen: the daily rate was about 157/day"* |
-| `partial_month_disclosed` | refuse the premise | weaker — said it could not confirm, rather than refuting the premise outright |
+| `partial_month_false_premise` | refuse the premise | weaker — *"cannot be determined"*, rather than refuting the premise outright |
+| `partial_month_disclosed` | refuse the premise | *"No — signups did not fall. The daily signup rate held steady at roughly 157/day"* |
 | `insufficient_evidence` | no cause | declined: the enterprise segment the question asks about cannot be isolated |
-| `tempting_coincidence` | no cause | established a real 55% drop and declined to explain it |
+| `tempting_coincidence` | no cause | established a real 50% drop and declined to explain it |
 | `onboarding_regression_undecidable` | no cause | named the segment, declined the cause |
 | `campaign_traffic_drop_undecidable` | no cause | named the channel, declined the cause |
 
 ## These are single runs, not a scorecard
 
 The analyst is stochastic, and the variance is large: two runs of the same question can
-differ by seven cited claims. In this set `partial_month_disclosed` refused weakly while
-`partial_month_false_premise` refused cleanly — in an earlier recording of the same pair it
-was the other way round. Both are in the table as they happened.
+differ by seven cited claims. In this set `partial_month_false_premise` refused weakly while
+`partial_month_disclosed` refused cleanly — in the recording these replaced it was the other
+way round, and in the one before that it had been this way. Nothing about the code changed
+between them. Both are in the table as they happened.
 
 For how often the system gets these right, run the eval suite, which scores many runs. What
 a recording shows that a score cannot is the shape of the reasoning: which hypotheses were
@@ -78,14 +79,26 @@ analyst works for ninety seconds printing four progress lines, then prints its w
 in a burst that scrolls past in about a second. `scripts/pace_cast.py` rewrites the timing
 and nothing else — it asserts the byte stream is unchanged before writing.
 
+The two GIFs the top-level README opens with are cut from one of these recordings by:
+
+```
+scripts/make_readme_gifs.sh [scenario]
+```
+
+Both boundaries are found by anchor rather than by timestamp — the report's opening rule and
+the answer key's heading — so a re-recorded run that took a different number of steps still
+cuts in the right place. They were cut by hand once, and as a result went on showing an old
+phase breakdown for some time after the code that printed it had been fixed.
+
 ## Known defects visible in these recordings
 
 Recorded honestly rather than edited out:
 
-- **`onboarding_regression_undecidable` contains a literal `—`** where an em-dash
-  belongs. The sufficiency gate's own prompt contains em-dashes, and the model echoes them
-  back into its JSON as an escape rather than a character. It reproduces across runs. Fixing
-  it needs escape decoding on model output, which is not yet done.
+- **Two recordings contain a literal `\u2014` or `\u2013`** where a dash belongs —
+  `onboarding_regression_undecidable` and `partial_month_disclosed`. The sufficiency gate's
+  own prompt contains dashes, and the model echoes them back into its JSON as an escape
+  rather than a character. It reproduces across runs and survived turning off `ensure_ascii`
+  on the way out. Fixing it needs escape decoding on model output, which is not yet done.
 - **`tempting_coincidence` does not test what it is named for.** Its bait — a copy-only PR
   merged the day before the drop — is reachable through exactly one call, and the analyst
   usually takes a different and equally reasonable route, finds an empty world, and declines.

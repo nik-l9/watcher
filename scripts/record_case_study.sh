@@ -91,6 +91,18 @@ for name in $scenarios; do
     rm -f "${OUT}/${name}.cast" "${OUT}/${name}.txt"
     exit 1
   fi
+
+  # A recording that stops partway is the same failure wearing different clothes, and the
+  # traceback check does not see it: interrupt a run during the drafting call and what is
+  # left is a well-formed .cast holding a question, a few progress lines and nothing else,
+  # which this script then reports as a recording it wrote. Every labelled run ends with the
+  # truth block, so its absence means the run did not finish.
+  if ! grep -q "^WHAT THE DATA ACTUALLY CONTAINED" "${OUT}/${name}.txt"; then
+    echo "REFUSING: ${name} stops before the answer key -- the run did not finish." >&2
+    tail -3 "${OUT}/${name}.txt" >&2
+    rm -f "${OUT}/${name}.cast" "${OUT}/${name}.txt"
+    exit 1
+  fi
 done
 
 echo "wrote ${count} recording(s) to ${OUT}/" >&2
