@@ -1,0 +1,27 @@
+# Publishes to PyPI when a GitHub release is published. Uses trusted publishing (OIDC), so no
+# API token is stored anywhere: PyPI trusts this exact repository, workflow file and
+# environment, and nothing else. Renaming this file or the `pypi` environment breaks that trust
+# until the publisher is updated on PyPI.
+name: publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      contents: read
+      # The only write this job needs: minting the short-lived OIDC token PyPI verifies.
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

@@ -22,7 +22,7 @@ only offered the connectors you have credentials for. One is enough to ask a que
 ## Watch it work
 
 <p align="center">
-  <img src="docs/case-studies/img/investigating.gif" alt="watcher investigating: the question, the tool calls, the answer" width="820">
+  <img src="https://raw.githubusercontent.com/nik-l9/watcher/main/docs/case-studies/img/investigating.gif" alt="watcher investigating: the question, the tool calls, the answer" width="820">
 </p>
 
 Every labelled run ends by printing what was **actually planted in the data**, underneath what it
@@ -30,14 +30,14 @@ just claimed — so the question stops being *does this sound right* and becomes
 right*.
 
 <p align="center">
-  <img src="docs/case-studies/img/answer-key.gif" alt="the run printing what was actually planted in the data" width="820">
+  <img src="https://raw.githubusercontent.com/nik-l9/watcher/main/docs/case-studies/img/answer-key.gif" alt="the run printing what was actually planted in the data" width="820">
 </p>
 
 Seventeen recorded runs, unedited — eleven against labelled datasets, six against a live CRM with
 every figure and name masked. Four of the eleven have nothing to find, because the correct answer
 is a refusal.
 
-→ **[docs/case-studies/](docs/case-studies/)**
+→ **[docs/case-studies/](https://github.com/nik-l9/watcher/tree/main/docs/case-studies/)**
 
 ## Quickstart
 
@@ -78,8 +78,8 @@ watcher ask --real --tenant acme "Why did signups fall last week?"
 | `watcher eval` | Score the analyst against labelled fixtures (spends tokens) |
 | `watcher ingest` | Sync a connector's history |
 
-More in [docs/running-it.md](docs/running-it.md). Every setting is documented in
-[`.env.example`](.env.example).
+More in [docs/running-it.md](https://github.com/nik-l9/watcher/blob/main/docs/running-it.md). Every setting is documented in
+[`.env.example`](https://github.com/nik-l9/watcher/blob/main/.env.example).
 
 ## What you need
 
@@ -111,12 +111,12 @@ cannot reach into, and the loop is where every grounding guarantee is enforced.
 - **Nothing in the scoring path consults a model.** The product's central claim must not be graded
   by the same kind of component it exists to constrain.
 
-Full reasoning in [docs/architecture.md](docs/architecture.md), the decision records in
-[docs/decisions/](docs/decisions/), and testing in [docs/testing.md](docs/testing.md).
+Full reasoning in [docs/architecture.md](https://github.com/nik-l9/watcher/blob/main/docs/architecture.md), the decision records in
+[docs/decisions/](https://github.com/nik-l9/watcher/tree/main/docs/decisions/), and testing in [docs/testing.md](https://github.com/nik-l9/watcher/blob/main/docs/testing.md).
 
 ## Licence
 
-**AGPL-3.0-or-later** ([`LICENSE`](LICENSE)), with a commercial licence available.
+**AGPL-3.0-or-later** ([`LICENSE`](https://github.com/nik-l9/watcher/blob/main/LICENSE)), with a commercial licence available.
 
 The practical difference, because AGPL has a reputation that outruns what it restricts:
 
@@ -141,7 +141,7 @@ first outside contribution is merged — retroactive relicensing needs every con
 and is how dual-licensed projects get stuck.
 
 **The datastores are a separate question** and the analysis is in
-[`docs/licensing.md`](docs/licensing.md): two of the four are source-available rather than open
+[`docs/licensing.md`](https://github.com/nik-l9/watcher/blob/main/docs/licensing.md): two of the four are source-available rather than open
 source, which constrains a *hosted* launch and not self-hosting. It names three routes out, the
 cheapest being Redis → Valkey.
 
